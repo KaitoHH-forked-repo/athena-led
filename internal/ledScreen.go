@@ -61,7 +61,7 @@ func getGpioPin() (stbLeft, stbRight, clk, dio int, err error) {
 	file, err := os.Open("/etc/openwrt_release")
 	if err != nil {
 		fmt.Println("Error opening file:", err)
-		return
+		return 581, 582, 585, 586, nil
 	}
 	defer func(file *os.File) {
 		_ = file.Close()

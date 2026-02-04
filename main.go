@@ -15,11 +15,50 @@ import (
 	"syscall"
 	"time"
 	_ "time/tzdata"
+
+	"github.com/pquerna/cachecontrol"
 )
 
 var status byte = 0b00001111
 
+var (
+	seconds      int
+	lightLevel   int
+	urlCacheTime int
+	statusVar    string
+	options      string
+	value        string
+	url          string
+	tempFlag     string
+	printStr     string
+)
+
 func main() {
+	flag.IntVar(&seconds, "seconds", 5, "Led switching time (seconds)")
+	flag.IntVar(&lightLevel, "lightLevel", 5, "Led light level, 0-7")
+	flag.IntVar(&urlCacheTime, "urlCacheTime", 60, `The cache time for getByUrl (seconds)`)
+	flag.StringVar(&statusVar, "status", "", "Space separated status types. Possible values: "+
+		`time medal upload download. If set, display them after displaying content of each option`)
+	flag.StringVar(&options, "option", "date timeBlink", `Space separated led options. Possible values: `+
+		`date time timeBlink temp string getByUrl"`)
+	flag.StringVar(&value, "value", "In God We Trust", `The "string" option: text content. `+
+		`Allowed chars: all visible ASCII chars, some special unicode symbols like `+
+		`♥ (heart), ☀ (sunny), ☁ (cloudy), 🌧 (rainy), ⛈ (thunderstorm), ❄ (snow), 🌫 (fog)`)
+	flag.StringVar(&url, "url", "https://ipinfo.io/ip", `The "getByUrl" option: api url for get content`)
+	flag.StringVar(&tempFlag, "tempFlag", "4", `The "temp" option: space separated temperature types. `+
+		`possible values: 0-6. Corresponding to "/sys/class/thermal/thermal_zone%d"`)
+	flag.StringVar(&printStr, "print", "", "Debug: print string graph in terminal and exit")
+	flag.Parse()
+
+	if printStr != "" {
+		for _, r := range strings.ToUpper(printStr) {
+			fmt.Printf("Character: %c\n", r)
+			athenaLed.PrintChar(os.Stdout, r)
+			fmt.Println(strings.Repeat("-", 20))
+		}
+		return
+	}
+
 	screen, err := athenaLed.Init()
 	if err != nil {
 		fmt.Printf("Init error: %v\n", err)
@@ -36,17 +75,9 @@ func main() {
 }
 
 func mainLoop(screen athenaLed.LedScreen) {
-	statusVar := flag.String("status", "", "led status")
-	seconds := flag.Int("seconds", 5, "led switching time (second)")
-	lightLevel := flag.Int("lightLevel", 5, "led light level 0-7")
-	options := flag.String("option", "date timeBlink", "led option")
-	value := flag.String("value", "abcdefghijklmnopqrstuvwxyz0123456789+-*/=.:：℃", "led content")
-	url := flag.String("url", "https://www.baidu.com/", "api url for get content")
-	tempFlag := flag.String("tempFlag", "4", "show temp for something,0-6")
-	flag.Parse()
 
 	var statusFlag byte = 0
-	for _, item := range strings.Split(*statusVar, " ") {
+	for _, item := range strings.Split(statusVar, " ") {
 		switch item {
 		case "time":
 			statusFlag |= 1
@@ -61,29 +92,32 @@ func mainLoop(screen athenaLed.LedScreen) {
 
 	status = statusFlag << 4 >> 4
 
-	fmt.Println(*statusVar, *seconds, *lightLevel, *options, *value, *url)
-	err := screen.Power(true, byte(*lightLevel))
+	fmt.Println(statusVar, seconds, lightLevel, options, value, url)
+	err := screen.Power(true, byte(lightLevel))
 	if err != nil {
 		fmt.Printf("SetPower error: %v\n", err)
 		return
 	}
 	zoneName := getZoneName()
 	timeFlag := false
+	optionsArr := strings.Split(options, " ")
+	urlBody := ""
+	urlExpires := time.Time{}
 	for {
 	optionLoop:
-		for _, option := range strings.Split(*options, " ") {
+		for _, option := range optionsArr {
 			fmt.Println(option)
 			switch option {
 			case "date":
 				formattedTime := timeFormat(zoneName, "01-02")
 				screen.WriteData(formattedTime, status)
-				time.Sleep(time.Duration(*seconds) * time.Second)
+				time.Sleep(time.Duration(seconds) * time.Second)
 			case "time":
 				formattedTime := timeFormat(zoneName, "15:04")
 				screen.WriteData(formattedTime, status)
-				time.Sleep(time.Duration(*seconds) * time.Second)
+				time.Sleep(time.Duration(seconds) * time.Second)
 			case "timeBlink":
-				ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*seconds)*time.Second)
+				ctx, cancel := context.WithTimeout(context.Background(), time.Duration(seconds)*time.Second)
 				for {
 					select {
 					case <-ctx.Done():
@@ -100,29 +134,55 @@ func mainLoop(screen athenaLed.LedScreen) {
 					time.Sleep(1 * time.Second)
 				}
 			case "temp":
-				tempString := getTemp(*tempFlag)
+				tempString := getTemp(tempFlag)
 				if strings.EqualFold(tempString, "") {
 					continue
 				}
 				screen.WriteData(tempString, status)
-				time.Sleep(time.Duration(*seconds) * time.Second)
+				time.Sleep(time.Duration(seconds) * time.Second)
 			case "string":
-				screen.WriteData(*value, status)
-				time.Sleep(time.Duration(*seconds) * time.Second)
+				screen.WriteData(value, status)
+				time.Sleep(time.Duration(seconds) * time.Second)
 			case "getByUrl":
-				resp, err := http.Get(*url)
+				now := time.Now()
+				if urlBody != "" && now.Before(urlExpires) {
+					screen.WriteData(urlBody, status)
+					time.Sleep(time.Duration(seconds) * time.Second)
+					continue optionLoop
+				}
+				req, err := http.NewRequest(http.MethodGet, url, nil)
 				if err != nil {
 					fmt.Println("Error:", err)
 					continue optionLoop
 				}
-				body, err := io.ReadAll(resp.Body)
-				_ = resp.Body.Close()
+				res, err := http.DefaultClient.Do(req)
+				if err != nil {
+					fmt.Println("Error:", err)
+					continue optionLoop
+				}
+				if res.StatusCode != 200 {
+					fmt.Printf("Error: status=%d\n", res.StatusCode)
+					res.Body.Close()
+					continue optionLoop
+				}
+				body, err := io.ReadAll(res.Body)
+				res.Body.Close()
 				if err != nil {
 					fmt.Println("Error reading response body:", err)
 					continue optionLoop
 				}
+				_, resExpires, _ := cachecontrol.CachableResponse(req, res, cachecontrol.Options{})
+				if resExpires.After(now) || urlCacheTime > 0 {
+					urlBody = string(body)
+					if urlCacheTime > 0 {
+						urlExpires = now.Add(time.Second * time.Duration(urlCacheTime))
+					}
+					if resExpires.After(urlExpires) {
+						urlExpires = resExpires
+					}
+				}
 				screen.WriteData(string(body), status)
-				time.Sleep(time.Duration(*seconds) * time.Second)
+				time.Sleep(time.Duration(seconds) * time.Second)
 			}
 		}
 	}
@@ -168,7 +228,11 @@ func timeFormat(zoneName, layout string) string {
 }
 
 func getZoneName() string {
-	zoneName := "Asia/Shanghai"
+	zoneName := os.Getenv("TZ")
+	if zoneName != "" {
+		return zoneName
+	}
+	zoneName = "Asia/Shanghai"
 	file, err := os.Open("/etc/config/system")
 	if err != nil {
 		fmt.Println("Error opening file:", err)

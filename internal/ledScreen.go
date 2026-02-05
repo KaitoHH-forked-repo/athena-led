@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const WIDTH = 27
+
 var fileDict = map[int]*os.File{}
 
 // LedScreen 完整屏幕
@@ -138,9 +140,11 @@ func (screen LedScreen) WriteData(str string, status byte) {
 	for _, item := range strings.ToUpper(str) {
 		data = append(data, charDict[item]...)
 	}
+	screen.WriteRawData(data, status)
+}
 
-	length := len(data)
-	if length > 27 {
+func (screen LedScreen) WriteRawData(data []byte, status byte) {
+	if len(data) > WIDTH {
 		screen.flow(data, status)
 	} else {
 		screen.static(data, status)
@@ -151,8 +155,8 @@ func (screen LedScreen) WriteData(str string, status byte) {
 func (screen LedScreen) flow(data []byte, status byte) {
 	start := 0
 	for i := 1; i <= len(data); i++ {
-		off := [27]byte{}
-		if i-27 > 0 {
+		off := [WIDTH]byte{}
+		if i-WIDTH > 0 {
 			start++
 		}
 		copy(off[:], data[start:i])
@@ -168,9 +172,9 @@ func (screen LedScreen) flow(data []byte, status byte) {
 // 静态显示
 func (screen LedScreen) static(data []byte, status byte) {
 	length := len(data)
-	if length < 27 {
-		paddedData := make([]byte, 27)
-		offset := (27 - length) / 2
+	if length < WIDTH {
+		paddedData := make([]byte, WIDTH)
+		offset := (WIDTH - length) / 2
 		copy(paddedData[offset:], data)
 		data = paddedData
 	}
@@ -183,8 +187,8 @@ func (screen LedScreen) static(data []byte, status byte) {
 }
 
 func (screen LedScreen) doWriteData(values []byte, status byte) error {
-	if len(values) < 27 {
-		tmp := make([]byte, 27)
+	if len(values) < WIDTH {
+		tmp := make([]byte, WIDTH)
 		copy(tmp, values)
 		values = tmp
 	}
@@ -193,5 +197,5 @@ func (screen LedScreen) doWriteData(values []byte, status byte) error {
 	if err != nil {
 		return err
 	}
-	return screen.rightScreen.printf(append(values[14:27], status))
+	return screen.rightScreen.printf(append(values[14:WIDTH], status))
 }

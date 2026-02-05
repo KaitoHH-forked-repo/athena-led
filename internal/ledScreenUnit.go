@@ -26,7 +26,7 @@ type ledScreenUnit struct {
 	dio int
 }
 
-func (screen ledScreenUnit) initGpio() error {
+func (screen *ledScreenUnit) initGpio() error {
 	err := screen.exportAndSetPinDirection(screen.stb)
 	if err != nil {
 		return err
@@ -40,7 +40,7 @@ func (screen ledScreenUnit) initGpio() error {
 	return screen.exportAndSetPinDirection(screen.dio)
 }
 
-func (screen ledScreenUnit) exportAndSetPinDirection(pin int) error {
+func (screen *ledScreenUnit) exportAndSetPinDirection(pin int) error {
 	err := screen.export(pin)
 	if err != nil {
 		return err
@@ -48,7 +48,7 @@ func (screen ledScreenUnit) exportAndSetPinDirection(pin int) error {
 	return screen.setPinDirection(pin)
 }
 
-func (screen ledScreenUnit) export(pin int) error {
+func (screen *ledScreenUnit) export(pin int) error {
 	filename := fmt.Sprintf("/sys/class/gpio/gpio%d", pin)
 	_, err := os.Stat(filename)
 	if os.IsNotExist(err) {
@@ -59,7 +59,7 @@ func (screen ledScreenUnit) export(pin int) error {
 }
 
 // Set the direction of a pin.
-func (screen ledScreenUnit) setPinDirection(pin int) error {
+func (screen *ledScreenUnit) setPinDirection(pin int) error {
 	filename := fmt.Sprintf("/sys/class/gpio/gpio%d/direction", pin)
 	f, err := os.OpenFile(filename, os.O_WRONLY, 0)
 	if err != nil {
@@ -72,7 +72,7 @@ func (screen ledScreenUnit) setPinDirection(pin int) error {
 	return err
 }
 
-func (screen ledScreenUnit) destroyGpio() error {
+func (screen *ledScreenUnit) destroyGpio() error {
 	err := screen.unExport(screen.clk)
 	if err != nil {
 		return err
@@ -84,7 +84,7 @@ func (screen ledScreenUnit) destroyGpio() error {
 	return screen.unExport(screen.stb)
 }
 
-func (screen ledScreenUnit) unExport(pin int) error {
+func (screen *ledScreenUnit) unExport(pin int) error {
 	filename := fmt.Sprintf("/sys/class/gpio/gpio%d", pin)
 	_, err := os.Stat(filename)
 
@@ -99,17 +99,17 @@ func (screen ledScreenUnit) unExport(pin int) error {
 }
 
 // setShowModel 显示模式
-func (screen ledScreenUnit) setShowModel() error {
+func (screen *ledScreenUnit) setShowModel() error {
 	return screen.doWriteData(screen.stb, command1, nil)
 }
 
 // setDataModel 数据模式
-func (screen ledScreenUnit) setDataModel() error {
+func (screen *ledScreenUnit) setDataModel() error {
 	return screen.doWriteData(screen.stb, command2, nil)
 }
 
 // power 显示控制、亮度开关等
-func (screen ledScreenUnit) power(run bool, lightLevel byte) error {
+func (screen *ledScreenUnit) power(run bool, lightLevel byte) error {
 	// 0b1000 1111 第四位是开关 低位3位是亮度
 	if run {
 		command := (lightLevel<<5>>5 | 0b11111000) & 0b10001111
@@ -118,11 +118,11 @@ func (screen ledScreenUnit) power(run bool, lightLevel byte) error {
 	return screen.doWriteData(screen.stb, 0b10000000, nil)
 }
 
-func (screen ledScreenUnit) printf(values []byte) error {
+func (screen *ledScreenUnit) printf(values []byte) error {
 	return screen.doWriteData(screen.stb, command3, values)
 }
 
-func (screen ledScreenUnit) doWriteData(stb int, command byte, values []byte) error {
+func (screen *ledScreenUnit) doWriteData(stb int, command byte, values []byte) error {
 	if len(values) > 14 {
 		values = values[:14]
 	}
@@ -144,7 +144,7 @@ func (screen ledScreenUnit) doWriteData(stb int, command byte, values []byte) er
 	return screen.doWriteBit(stb, high)
 }
 
-func (screen ledScreenUnit) writeCommandByte(value byte) error {
+func (screen *ledScreenUnit) writeCommandByte(value byte) error {
 	for i := 0; i <= 7; i++ {
 		var bit = (value >> i) & 0x01
 		err := screen.writeBit(bit)
@@ -155,7 +155,7 @@ func (screen ledScreenUnit) writeCommandByte(value byte) error {
 	return nil
 }
 
-func (screen ledScreenUnit) writeDataByte(value byte, fillData bool) error {
+func (screen *ledScreenUnit) writeDataByte(value byte, fillData bool) error {
 	for i := 0; i <= 4; i++ {
 		var bit = (value >> i) & 0x01
 		err := screen.writeBit(bit)
@@ -174,7 +174,7 @@ func (screen ledScreenUnit) writeDataByte(value byte, fillData bool) error {
 	return nil
 }
 
-func (screen ledScreenUnit) writeBit(bit byte) error {
+func (screen *ledScreenUnit) writeBit(bit byte) error {
 	err := screen.doWriteBit(screen.clk, low)
 	if err != nil {
 		return err
@@ -186,7 +186,7 @@ func (screen ledScreenUnit) writeBit(bit byte) error {
 	return screen.doWriteBit(screen.clk, high)
 }
 
-func (screen ledScreenUnit) doWriteBit(gpioNum int, bit byte) error {
+func (screen *ledScreenUnit) doWriteBit(gpioNum int, bit byte) error {
 	file := fileDict[gpioNum]
 	if file == nil {
 		gpioPath := fmt.Sprintf("/sys/class/gpio/gpio%d/value", gpioNum)

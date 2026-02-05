@@ -1,7 +1,6 @@
 package main
 
 import (
-	athenaLed "athenaLed/internal"
 	"bufio"
 	"context"
 	"flag"
@@ -19,48 +18,90 @@ import (
 	_ "time/tzdata"
 
 	"github.com/pquerna/cachecontrol"
+
+	athenaLed "athenaLed/internal"
 )
 
-const Version = "v0.1.1"
+const (
+	Version            = "v0.1.2"
+	OPTION_DATE        = "date"
+	OPTION_TIME        = "time"
+	OPTION_TIME_BLINK  = "time_blink"
+	OPTION_TIME_BLINK2 = "timeBlink" // reserved for compatibility
+	OPTION_TEMP        = "temp"
+	OPTION_TEXT        = "text"
+	OPTION_STRING      = "string"
+	OPTION_DINO        = "dino"
+	OPTION_URL         = "url"
+	OPTION_GET_BY_URL  = "getByUrl" // reserved for compatibility
 
-var status byte = 0b00001111
+	HELP_OPTION = `Space separated led options. Possible values: ` + OPTION_DATE + ", " + OPTION_TIME + ", " +
+		OPTION_TIME_BLINK + " (" + OPTION_TIME_BLINK2 + ")" + ", " + OPTION_TEXT + " (" + OPTION_STRING + ")" + ", " +
+		OPTION_DINO + ", " + OPTION_TEMP + ", " + OPTION_URL + " (" + OPTION_GET_BY_URL + "). " +
+		`Use ":value" format suffix to set option value (replace space with _), ` +
+		`values of each type option have different meanings: "` + OPTION_DATE + `", "` + OPTION_TIME + `", ` +
+		OPTION_TIME_BLINK + `": Go time format layout, e.g. "01-02" or "15:04"; "` + OPTION_TEMP +
+		`": temperature type digits string; "` + OPTION_TEXT + `": text contents; "` + OPTION_URL +
+		`": the http(s):// url. Use "#5" format suffix to set led switching time (duration seconds). ` +
+		`E.g. "string:I_have_a_dream", "url:https://ipinfo.io/json#5"`
+	DEFAULT_OPTION      = OPTION_DATE + " " + OPTION_TIME_BLINK
+	DEFAULT_TIME_FORMAT = "15:04"
+	DEFAULT_DATE_FORMAT = "01-02"
+)
+
+type Option struct {
+	Type     string
+	Value    string
+	Duration int
+}
+
+type ContentCache struct {
+	Data    string
+	Expires time.Time
+}
 
 var (
-	oneShot      bool
-	seconds      int
-	lightLevel   int
-	urlCacheTime int
-	statusVar    string
-	options      string
-	value        string
-	url          string
-	tempFlag     string
-	printStr     string
+	OneShot      bool
+	Seconds      int
+	LightLevel   int
+	UrlCacheTime int
+	StatusVar    string
+	OptionFlag   string
+	Text         string
+	Url          string
+	TempFlag     string
+	PrintStr     string
+	Status       byte
+
+	// key: option index
+	Cache = map[int]ContentCache{}
 )
 
 func main() {
 	fmt.Printf("athena-led %s\n", Version)
 
-	flag.BoolVar(&oneShot, "oneShot", false, "Display once and exit")
-	flag.IntVar(&seconds, "seconds", 5, "Led switching time (seconds)")
-	flag.IntVar(&lightLevel, "lightLevel", 5, "Led light level, 0-7")
-	flag.IntVar(&urlCacheTime, "urlCacheTime", 60, `The cache time for getByUrl (seconds)`)
-	flag.StringVar(&statusVar, "status", "", "Space separated light-on side led status types. "+
-		`Defined side led types (from top to bottom): time medal upload download`)
-	flag.StringVar(&options, "option", "date timeBlink", `Space separated led options. Possible values: `+
-		`date time timeBlink temp string dino getByUrl"`)
-	flag.StringVar(&value, "value", "In God We Trust", `The "string" option: text content. `+
+	flag.BoolVar(&OneShot, "oneShot", false, "Display once and exit")
+	flag.IntVar(&Seconds, "seconds", 5, "Default led switching time (seconds)")
+	flag.IntVar(&LightLevel, "lightLevel", 5, "Led light level, 0-7")
+	flag.IntVar(&UrlCacheTime, "urlCacheTime", 60, `The min cache time for "`+OPTION_URL+`" option (seconds). `+
+		`Negative or zero value means no minimal cache time. It respects the url "Cache-Control" response header`)
+	flag.StringVar(&StatusVar, "status", "", "Space separated light-on side led list. "+
+		`All Side led list (two each side, from top to bottom, left to right side): time medal upload download`)
+	flag.StringVar(&OptionFlag, "option", DEFAULT_OPTION, HELP_OPTION)
+	flag.StringVar(&Text, "value", "In God We Trust", `The "`+OPTION_TEXT+`" option: default text contents. `+
 		`Allowed chars: all visible ASCII chars, some special unicode symbols like `+
 		`♥ (heart), ☀ (sunny), ☾ (moon), ☁ (cloudy), 🌧 (rainy), ⛈ (thunderstorm), ❄ (snow), 🌫 (fog), `+
 		`←, →, ↑, ↓, ↗, ↘, ✓, ✗`)
-	flag.StringVar(&url, "url", "https://ipinfo.io/ip", `The "getByUrl" option: api url for get content`)
-	flag.StringVar(&tempFlag, "tempFlag", "4", `The "temp" option: space separated temperature types. `+
-		`Possible values: 0-6. Corresponding to "/sys/class/thermal/thermal_zone%d"`)
-	flag.StringVar(&printStr, "print", "", "Debug: print string graph in terminal and exit")
+	flag.StringVar(&Url, "url", "https://ipinfo.io/ip", `The "`+OPTION_URL+`" option: default http(s):// url`)
+	flag.StringVar(&TempFlag, "tempFlag", "4", `The "`+OPTION_TEMP+`" option: temperature type digits string. `+
+		`Possible digits: 0-6. Corresponding to "/sys/class/thermal/thermal_zone[0-6]". `+
+		`0: nss-top; 1: nss; 2: wcss-phya0; 3: wcss-phya1; 4: cpu; 5: lpass; 6: ddrss. `+
+		`E.g. "124" will display temperatures of thermal_zone 1, 2 and 4 in order`)
+	flag.StringVar(&PrintStr, "print", "", "Debug: print string character graphes in terminal and exit")
 	flag.Parse()
 
-	if printStr != "" {
-		for _, r := range strings.ToUpper(printStr) {
+	if PrintStr != "" {
+		for _, r := range strings.ToUpper(PrintStr) {
 			fmt.Printf("Character: %c\n", r)
 			athenaLed.PrintChar(os.Stdout, r)
 			fmt.Println(strings.Repeat("-", 20))
@@ -119,14 +160,11 @@ func main() {
 		// 等待信号 或 任务完成
 		select {
 		case <-reloadCh:
-			fmt.Println("\nReceived SIGHUP. Refreshing display...")
+			fmt.Println("Received SIGHUP. Refreshing display...")
 			cancel() // 通知 mainLoop 停止
 			// 注意：这里不需要 <-loopDone，因为 cancel 会导致 mainLoop 退出，随后 wg.Wait() 会处理同步
 		case <-exitCh:
-			fmt.Println("\nReceived Exit signal. Shutting down...")
-			cancel()  // 通知 mainLoop 停止
-			wg.Wait() // 等待 cleanup
-			return    // 退出 main 函数，触发 defer screen.Destroy()
+			os.Exit(1)
 		case <-loopDone:
 			// 新增：如果 mainLoop 自己执行完了（比如 oneShot），会走到这里
 			cancel() // 释放 context 资源
@@ -136,13 +174,14 @@ func main() {
 		wg.Wait()
 
 		// 如果是 oneShot 模式，任务执行完就退出程序
-		if oneShot {
+		if OneShot {
 			return
 		}
 	}
 }
 
-// 辅助函数：支持 Context 取消的 Sleep
+// 辅助函数：支持 Context 取消的 Sleep.
+// It blocks and returns true if time over; Return false if it returns because of ctx is done
 func sleep(ctx context.Context, d time.Duration) bool {
 	select {
 	case <-ctx.Done():
@@ -152,135 +191,132 @@ func sleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-func mainLoop(ctx context.Context, screen athenaLed.LedScreen) {
-	var statusFlag byte = 0
-	for _, item := range strings.Split(statusVar, " ") {
+func mainLoop(ctx context.Context, screen *athenaLed.LedScreen) {
+	for _, item := range strings.Split(StatusVar, " ") {
+		item = strings.TrimSpace(item)
 		switch item {
 		case "time":
-			statusFlag |= 1
+			Status |= 1
 		case "medal":
-			statusFlag |= 2
+			Status |= 2
 		case "upload":
-			statusFlag |= 4
+			Status |= 4
 		case "download":
-			statusFlag |= 8
+			Status |= 8
 		}
 	}
+	var options []*Option
+	for _, optionStr := range strings.Split(OptionFlag, " ") {
+		optionStr = strings.TrimSpace(optionStr)
+		if optionStr == "" {
+			continue
+		}
+		options = append(options, parseOption(optionStr))
+	}
+	fmt.Printf("status=%08b, seconds=%d, lightLevel=%d, text=%s, url=%s, option (%d): %s\n",
+		Status, Seconds, LightLevel, Text, Url, len(options), OptionFlag)
 
-	status = statusFlag << 4 >> 4
-
-	fmt.Println(statusVar, seconds, lightLevel, options, value, url)
-	err := screen.Power(true, byte(lightLevel))
+	err := screen.Power(true, byte(LightLevel))
 	if err != nil {
 		fmt.Printf("SetPower error: %v\n", err)
 		return
 	}
-	zoneName := getZoneName()
+	location, _ := time.LoadLocation(getZoneName()) // is this necessary?
+	if location == nil {
+		location = time.Local
+	}
 	timeFlag := false
-	optionsArr := strings.Split(options, " ")
-	urlBody := ""
-	urlExpires := time.Time{}
 
 	for {
-		for i, option := range optionsArr {
+	optionLoop:
+		for i, option := range options {
 			// 在每个操作开始前检查 context 是否已取消
 			if ctx.Err() != nil {
 				return
 			}
-
-			returnAfterFinish := oneShot && i == len(optionsArr)-1
-			fmt.Println(option)
-			switch option {
-			case "date":
-				formattedTime := timeFormat(zoneName, "01-02")
-				screen.WriteData(formattedTime, status)
+			returnAfterFinish := OneShot && i == len(options)-1
+			fmt.Printf("option: %v\n", option)
+			switch option.Type {
+			case OPTION_DATE, OPTION_TIME:
+				formattedTime := time.Now().In(location).Format(option.Value)
+				screen.WriteData(formattedTime, getStatus())
 				if returnAfterFinish {
 					return
 				}
-				if !sleep(ctx, time.Duration(seconds)*time.Second) {
+				if !sleep(ctx, time.Duration(option.Duration)*time.Second) {
 					return
 				}
-			case "time":
-				formattedTime := timeFormat(zoneName, "15:04")
-				screen.WriteData(formattedTime, status)
-				if returnAfterFinish {
-					return
-				}
-				if !sleep(ctx, time.Duration(seconds)*time.Second) {
-					return
-				}
-			case "timeBlink":
+			case OPTION_TIME_BLINK, OPTION_TIME_BLINK2:
 				// 创建子 context，同时监听父 context 的取消
-				subCtx, subCancel := context.WithTimeout(ctx, time.Duration(seconds)*time.Second)
-				loopDone := false
-				for !loopDone {
+				subCtx, subCancel := context.WithTimeout(ctx, time.Duration(option.Duration)*time.Second)
+				for {
 					select {
 					case <-subCtx.Done(): // 超时或父 context 取消
 						subCancel()
-						loopDone = true
+						continue optionLoop
 					default:
-						formattedTime := timeFormat(zoneName, "15:04")
+						formattedTime := time.Now().In(location).Format(option.Value)
 						if timeFlag {
-							formattedTime = strings.ReplaceAll(formattedTime, ":", "  ")
+							// ":" is 2 columns width, while a single space is 1 column width.
+							formattedTime = strings.ReplaceAll(formattedTime, ":", "  ")
 						}
 						timeFlag = !timeFlag
-						screen.WriteData(formattedTime, status)
-
+						screen.WriteData(formattedTime, getStatus())
 						// 这里使用较短的 sleep，也要响应 context
-						if !sleep(subCtx, 1*time.Second) {
+						if !sleep(ctx, 1*time.Second) {
 							subCancel()
 							return // 如果是父 context 取消，直接从 mainLoop 返回
 						}
 					}
 				}
-			case "temp":
-				tempString := getTemp(tempFlag)
-				if strings.EqualFold(tempString, "") {
+			case OPTION_TEMP:
+				tempString := getTemp(option.Value)
+				if tempString == "" {
 					continue
 				}
-				screen.WriteData(tempString, status)
+				screen.WriteData(tempString, getStatus())
 				if returnAfterFinish {
 					return
 				}
-				if !sleep(ctx, time.Duration(seconds)*time.Second) {
+				if !sleep(ctx, time.Duration(option.Duration)*time.Second) {
 					return
 				}
-			case "string":
-				screen.WriteData(value, status)
+			case OPTION_TEXT, OPTION_STRING:
+				screen.WriteData(option.Value, getStatus())
 				if returnAfterFinish {
 					return
 				}
-				if !sleep(ctx, time.Duration(seconds)*time.Second) {
+				if !sleep(ctx, time.Duration(option.Duration)*time.Second) {
 					return
 				}
-			case "dino":
+			case OPTION_DINO:
 				// 传入 context 以便中断循环
-				runDino(ctx, screen, status)
+				runDino(ctx, screen, option.Duration)
 				// 检查是否因为 context 取消而返回的
 				if ctx.Err() != nil || returnAfterFinish {
 					return
 				}
-			case "getByUrl":
+			case OPTION_URL, OPTION_GET_BY_URL:
 				now := time.Now()
-				if urlBody != "" && now.Before(urlExpires) {
-					screen.WriteData(urlBody, status)
+				if now.Before(Cache[i].Expires) {
+					screen.WriteData(Cache[i].Data, getStatus())
 					if returnAfterFinish {
 						return
 					}
-					if !sleep(ctx, time.Duration(seconds)*time.Second) {
+					if !sleep(ctx, time.Duration(option.Duration)*time.Second) {
 						return
 					}
 					continue
 				}
 				// 使用 WithContext 创建请求，以便 HTTP 请求能被中断
-				req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+				req, err := http.NewRequestWithContext(ctx, http.MethodGet, option.Value, nil)
 				if err != nil {
-					fmt.Println("Error:", err)
+					fmt.Printf("Error create url %q http request: %v\n", option.Value, err)
 					continue
 				}
 				res, err := http.DefaultClient.Do(req)
 				if err != nil {
-					fmt.Println("Error:", err)
+					fmt.Printf("Error fetching url %q: %v\n", option.Value, err)
 					// 如果是因为 cancel 导致的错误，直接返回
 					if ctx.Err() != nil {
 						return
@@ -288,37 +324,42 @@ func mainLoop(ctx context.Context, screen athenaLed.LedScreen) {
 					continue
 				}
 				if res.StatusCode != 200 {
-					fmt.Printf("Error: status=%d\n", res.StatusCode)
+					fmt.Printf("Error fetching url %q: status=%d\n", option.Value, res.StatusCode)
 					res.Body.Close()
 					continue
 				}
-				body, err := io.ReadAll(res.Body)
+				bodyBytes, err := io.ReadAll(res.Body)
 				res.Body.Close()
 				if err != nil {
-					fmt.Println("Error reading response body:", err)
+					fmt.Printf("Error reading url %q response body: %v\n", option.Value, err)
 					continue
 				}
+				body := strings.TrimSpace(string(bodyBytes))
 				_, resExpires, _ := cachecontrol.CachableResponse(req, res, cachecontrol.Options{})
-				if resExpires.After(now) || urlCacheTime > 0 {
-					urlBody = string(body)
-					if urlCacheTime > 0 {
-						urlExpires = now.Add(time.Second * time.Duration(urlCacheTime))
+				if resExpires.After(now) || UrlCacheTime > 0 {
+					var expires time.Time
+					if UrlCacheTime > 0 {
+						expires = now.Add(time.Second * time.Duration(UrlCacheTime))
 					}
-					if resExpires.After(urlExpires) {
-						urlExpires = resExpires
+					if resExpires.After(expires) {
+						expires = resExpires
+					}
+					Cache[i] = ContentCache{
+						Data:    body,
+						Expires: expires,
 					}
 				}
-				fmt.Printf("url %s body %s expires %s", url, body, urlExpires)
-				screen.WriteData(string(body), status)
+				fmt.Printf("url %s body %q expires %s\n", option.Value, body, Cache[i].Expires)
+				screen.WriteData(body, getStatus())
 				if returnAfterFinish {
 					return
 				}
-				if !sleep(ctx, time.Duration(seconds)*time.Second) {
+				if !sleep(ctx, time.Duration(option.Duration)*time.Second) {
 					return
 				}
 			}
 		}
-		if oneShot {
+		if OneShot {
 			return
 		}
 	}
@@ -326,20 +367,21 @@ func mainLoop(ctx context.Context, screen athenaLed.LedScreen) {
 
 func getTemp(tempFlags string) string {
 	value := ""
-	for i := 0; i <= 6; i++ {
-		if !strings.Contains(tempFlags, strconv.Itoa(i)) {
+	afterFirst := false
+	for _, char := range tempFlags {
+		if char < '0' || char > '6' {
 			continue
 		}
-
+		i, _ := strconv.Atoi(string(char))
 		typePath := fmt.Sprintf("/sys/class/thermal/thermal_zone%d/type", i)
 		tempPath := fmt.Sprintf("/sys/class/thermal/thermal_zone%d/temp", i)
 
-		zoneType, err := os.ReadFile(typePath)
+		zoneType, err := os.ReadFile(typePath) // "cpu-thermal"
 		if err != nil {
 			fmt.Printf("getTemp type from %s error: %v\n", typePath, err)
 			continue
 		}
-		tempData, err := os.ReadFile(tempPath)
+		tempData, err := os.ReadFile(tempPath) // "58000" => 58℃
 		if err != nil {
 			fmt.Printf("getTemp value from %s error: %v\n", tempPath, err)
 			continue
@@ -351,16 +393,14 @@ func getTemp(tempFlags string) string {
 			fmt.Printf("getTemp strconv.Atoi error: %v\n", tempStr)
 			continue
 		}
-		value += fmt.Sprintf("%s:%.1f℃   ", strings.ReplaceAll(strings.TrimSpace(string(zoneType)), "-thermal", ""), float64(tempInt)/1000.0)
+		if afterFirst {
+			value += "  "
+		}
+		value += fmt.Sprintf("%s:%.1f℃", strings.TrimSuffix(strings.TrimSpace(string(zoneType)), "-thermal"),
+			float64(tempInt)/1000.0)
+		afterFirst = true
 	}
 	return value
-}
-
-func timeFormat(zoneName, layout string) string {
-	loc, _ := time.LoadLocation(zoneName)
-	currentTime := time.Now().In(loc)
-	formattedTime := currentTime.Format(layout)
-	return formattedTime
 }
 
 func getZoneName() string {
@@ -371,7 +411,7 @@ func getZoneName() string {
 	zoneName = "Asia/Shanghai"
 	file, err := os.Open("/etc/config/system")
 	if err != nil {
-		fmt.Println("Error opening file:", err)
+		fmt.Printf("Error opening /etc/config/system file: %v\n", err)
 		return zoneName
 	}
 	defer func(file *os.File) {
@@ -392,13 +432,11 @@ func getZoneName() string {
 	return zoneName
 }
 
-const DINO_SECONDS = 5
-
 // runDino 启动恐龙快跑动画
 // status: LED 的状态字节（控制上面的指示灯等）
-func runDino(parentCtx context.Context, screen athenaLed.LedScreen, status byte) {
+func runDino(parentCtx context.Context, screen *athenaLed.LedScreen, duration int) {
 	// 创建一个子 Context，设置超时时间。
-	ctx, cancel := context.WithTimeout(parentCtx, time.Duration(DINO_SECONDS)*time.Second)
+	ctx, cancel := context.WithTimeout(parentCtx, time.Duration(duration)*time.Second)
 	defer cancel() // 确保函数退出时清理资源
 
 	// 动画刷新间隔
@@ -482,7 +520,7 @@ func runDino(parentCtx context.Context, screen athenaLed.LedScreen, status byte)
 		renderBuffer[4] = currentDino[1]
 
 		// --- 发送数据 ---
-		screen.WriteRawData(renderBuffer, status)
+		screen.WriteRawData(renderBuffer, getStatus())
 
 		tick++
 
@@ -491,5 +529,75 @@ func runDino(parentCtx context.Context, screen athenaLed.LedScreen, status byte)
 		if !sleep(ctx, frameDuration) {
 			return
 		}
+	}
+}
+
+func getStatus() [4]float64 {
+	probs := [4]float64{0, 0, 0, 0}
+	// Bit 0: Time
+	if (Status & 1) != 0 {
+		probs[athenaLed.LedTime] = 1.0
+	}
+	// Bit 1: Medal
+	if (Status & 2) != 0 {
+		probs[athenaLed.LedMedal] = 1.0
+	}
+	// Bit 2: Upload
+	if (Status & 4) != 0 {
+		probs[athenaLed.LedUpload] = 1.0
+	}
+	// Bit 3: Download
+	if (Status & 8) != 0 {
+		probs[athenaLed.LedDownload] = 1.0
+	}
+	return probs
+}
+
+// option example: `string:text_content#5`. both value and duration part are optional
+func parseOption(option string) *Option {
+	optionType := option
+	value := ""
+	duration := 0
+	i := strings.IndexByte(option, ':')
+	if i == -1 { // "string" or "string#5"
+		i = strings.LastIndexByte(option, '#')
+		if i != -1 {
+			optionType = option[:i]
+			duration, _ = strconv.Atoi(option[i+1:])
+		}
+	} else { // "string:text" or "string:text#5"
+		optionType = option[:i]
+		rest := option[i+1:]
+		j := strings.LastIndexByte(rest, '#')
+		if j != -1 {
+			value = rest[:j]
+			duration, _ = strconv.Atoi(rest[j+1:])
+		} else {
+			value = rest
+		}
+	}
+	if value == "" {
+		switch optionType {
+		case OPTION_TEXT, OPTION_STRING:
+			value = Text
+		case OPTION_DATE:
+			value = DEFAULT_DATE_FORMAT
+		case OPTION_TIME, OPTION_TIME_BLINK, OPTION_TIME_BLINK2:
+			value = DEFAULT_TIME_FORMAT
+		case OPTION_TEMP:
+			value = TempFlag
+		case OPTION_URL, OPTION_GET_BY_URL:
+			value = Url
+		}
+	} else {
+		value = strings.ReplaceAll(value, "_", " ")
+	}
+	if duration <= 0 {
+		duration = Seconds
+	}
+	return &Option{
+		Type:     optionType,
+		Value:    value,
+		Duration: duration,
 	}
 }

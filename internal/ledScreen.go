@@ -22,20 +22,21 @@ var fileDict = map[int]*os.File{}
 
 // LedScreen 完整屏幕
 type LedScreen struct {
-	leftScreen   ledScreenUnit
-	rightScreen  ledScreenUnit
+	leftScreen   *ledScreenUnit
+	rightScreen  *ledScreenUnit
 	mu           sync.Mutex // 互斥锁，保护 GPIO 操作
 	currentData  []byte     // 缓存当前屏幕显示的像素数据 (27 bytes)
 	currentProbs [4]float64 // 缓存当前 4 个灯的概率状态
 }
 
-func Init() (screen LedScreen, err error) {
+func Init() (screen *LedScreen, err error) {
 	stbLeft, stbRight, clk, dio, err := getGpioPin()
 	if err != nil {
 		fmt.Printf("getGpioPin error: %v\n", err)
 		return
 	}
-	leftScreen := ledScreenUnit{
+	screen = &LedScreen{}
+	leftScreen := &ledScreenUnit{
 		stb: stbLeft,
 		clk: clk,
 		dio: dio,
@@ -45,7 +46,7 @@ func Init() (screen LedScreen, err error) {
 		fmt.Printf("getGpioPin error: %v\n", err)
 		return
 	}
-	rightScreen := ledScreenUnit{
+	rightScreen := &ledScreenUnit{
 		stb: stbRight,
 		clk: clk,
 		dio: dio,
@@ -149,42 +150,41 @@ func (screen *LedScreen) Power(run bool, lightLevel byte) error {
 }
 
 func (screen *LedScreen) WriteData(str string, statusProbs [4]float64) {
+	str = strings.ToUpper(str)
 	data := make([]byte, 0)
-	for _, item := range []rune(str) { // 修正为 rune 遍历以支持 unicode
-		if val, ok := charDict[item]; ok {
-			data = append(data, val...)
-		}
+	for _, item := range str {
+		data = append(data, charDict[item]...)
 	}
 	length := len(data)
-	if length > 27 {
+	screen.mu.Lock()
+	defer screen.mu.Unlock()
+	if length > WIDTH {
 		// 滚动模式比较特殊，滚动时通常不建议高频刷新灯光，或者需要在滚动内部处理
 		// 这里暂且简化，滚动时不缓存 data
 		screen.flow(data, statusProbs)
 	} else {
 		// 静态显示：填充数据
-		paddedData := make([]byte, 27)
+		paddedData := make([]byte, WIDTH)
 		offset := (27 - length) / 2
 		copy(paddedData[offset:], data)
-
 		// 调用底层写入
-		screen.WriteRawData(paddedData, statusProbs)
+		screen.writeRawData(paddedData, statusProbs)
 	}
 }
 
-// WriteRawData 修改：签名变更 + 缓存状态
 func (screen *LedScreen) WriteRawData(data []byte, statusProbs [4]float64) {
 	screen.mu.Lock()
 	defer screen.mu.Unlock()
+	screen.writeRawData(data, statusProbs)
+}
 
+func (screen *LedScreen) writeRawData(data []byte, statusProbs [4]float64) {
 	// 1. 深拷贝缓存当前数据（供 Refresh 使用）
-	if len(screen.currentData) != 27 {
-		screen.currentData = make([]byte, 27)
+	if len(screen.currentData) != WIDTH {
+		screen.currentData = make([]byte, WIDTH)
 	}
 	// 确保输入数据长度正确
-	inputLen := len(data)
-	if inputLen > 27 {
-		inputLen = 27
-	}
+	inputLen := min(len(data), WIDTH)
 	copy(screen.currentData, data[:inputLen])
 
 	// 2. 缓存灯光概率
@@ -245,20 +245,16 @@ func shouldLight(prob float64) bool {
 
 func probs2Status(Probs [4]float64) byte {
 	var status byte = 0
-	var prob float64
-	prob = rand.Float64()
+	prob := rand.Float64()
 	if Probs[LedTime] >= prob {
 		status |= 1
 	}
-	prob = rand.Float64()
 	if Probs[LedMedal] >= prob {
 		status |= 2
 	}
-	prob = rand.Float64()
 	if Probs[LedUpload] >= prob {
 		status |= 4
 	}
-	prob = rand.Float64()
 	if Probs[LedDownload] >= prob {
 		status |= 8
 	}
@@ -280,23 +276,6 @@ func (screen *LedScreen) flow(data []byte, statusProbs [4]float64) {
 			return
 		}
 		time.Sleep(128 * time.Millisecond)
-	}
-}
-
-// 静态显示
-func (screen *LedScreen) static(data []byte, statusProbs [4]float64) {
-	length := len(data)
-	if length < WIDTH {
-		paddedData := make([]byte, WIDTH)
-		offset := (WIDTH - length) / 2
-		copy(paddedData[offset:], data)
-		data = paddedData
-	}
-
-	err := screen.doWriteData(data, probs2Status(statusProbs))
-	if err != nil {
-		fmt.Printf("something error: %v\n", err)
-		return
 	}
 }
 

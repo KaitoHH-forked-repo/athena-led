@@ -149,15 +149,20 @@ func (screen *LedScreen) Power(run bool, lightLevel byte) error {
 	return screen.rightScreen.power(run, lightLevel)
 }
 
+// 最多可以写入 WIDTH + 1 宽度的字符串而不需要滚动。
 func (screen *LedScreen) WriteData(str string, statusProbs [4]float64) {
 	str = strings.ToUpper(str)
 	data := make([]byte, 0)
 	for _, item := range str {
 		data = append(data, charDict[item]...)
 	}
-	length := len(data)
 	screen.mu.Lock()
 	defer screen.mu.Unlock()
+	// 所有字符最后一列都是空(0b00000000)，所以静态显示时可以去掉最后一列
+	if len(data) == WIDTH+1 {
+		data = data[:WIDTH]
+	}
+	length := len(data)
 	if length > WIDTH {
 		// 滚动模式比较特殊，滚动时通常不建议高频刷新灯光，或者需要在滚动内部处理
 		// 这里暂且简化，滚动时不缓存 data
@@ -194,11 +199,18 @@ func (screen *LedScreen) writeRawData(data []byte, statusProbs [4]float64) {
 	screen.flush()
 }
 
-// Refresh 仅用于刷新灯光状态（使用缓存的文字数据）
+// Refresh 用于刷新灯光状态（使用缓存的文字数据）
+// 如果 probs 不为 nil, 更新状态灯信息。
 // 供 main.go 中的定时器调用
-func (screen *LedScreen) Refresh() {
+func (screen *LedScreen) Refresh(probs *[4]float64) {
 	screen.mu.Lock()
 	defer screen.mu.Unlock()
+
+	if probs != nil {
+		screen.currentProbs = *probs
+	}
+
+	// 立即刷新硬件
 	screen.flush()
 }
 

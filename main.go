@@ -217,7 +217,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			defer close(loopDone) // 任务结束时关闭通道
-			Sm.Run(ctx)
+			go Sm.Run(ctx)
 			mainLoop(ctx, screen)
 		}()
 

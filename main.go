@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	_ "time/tzdata"
@@ -22,9 +23,16 @@ import (
 	athenaLed "athenaLed/internal"
 )
 
-const Version = "v0.1.3-dev"
+const Version = "v0.1.3"
+
+// syscall.SIGUSR1 & SIGUSR2 only available in Linux. But we are developping in Windows desktop
+// https://man7.org/linux/man-pages/man7/signal.7.html
+// We only consider arm64 signal values.
+const SIGUSR1 = syscall.Signal(10)
+const SIGUSR2 = syscall.Signal(12)
 
 const (
+	NONE              = "none"
 	OPTION_DATE       = "date"
 	OPTION_TIME       = "time"
 	OPTION_TIME_BLINK = "timeBlink" // reserved for compatibility
@@ -34,6 +42,7 @@ const (
 	OPTION_CPU        = "cpu"      // cpu usage
 	OPTION_UPLOAD     = "upload"   // network upload speed
 	OPTION_DOWNLOAD   = "download" // network download speed
+	OPTION_COUNTDOWN  = "countdown"
 	OPTION_DINO       = "dino"
 	OPTION_URL        = "url"
 	OPTION_GET_BY_URL = "getByUrl" // reserved for compatibility
@@ -41,18 +50,22 @@ const (
 	HELP_OPTION = `Space separated led options. Possible values: ` + OPTION_DATE + ", " + OPTION_TIME +
 		" (" + OPTION_TIME_BLINK + ")" + ", " + OPTION_TEXT + " (" + OPTION_STRING + ")" + ", " +
 		OPTION_DINO + ", " + OPTION_TEMP + ", " + OPTION_CPU + ", " + OPTION_UPLOAD + ", " + OPTION_DOWNLOAD + ", " +
-		OPTION_URL + " (" + OPTION_GET_BY_URL + "). " +
+		OPTION_COUNTDOWN + ", " + OPTION_URL + " (" + OPTION_GET_BY_URL + "). " +
 		`Use ":value" format suffix to set optional option value (replace space with _), ` +
 		`values of each type option have different meanings: "` + OPTION_DATE + `", "` + OPTION_TIME + `", ` +
 		OPTION_TIME_BLINK + `": Go time format layout, e.g. "` + DEFAULT_DATE_FORMAT + `" or "` + DEFAULT_TIME_FORMAT +
 		`"; "` + OPTION_TEMP + `": temperature type digits string; "` + OPTION_TEXT + `": text contents; "` + OPTION_URL +
 		`": the http(s):// url; "` + OPTION_UPLOAD + `", "` + OPTION_DOWNLOAD + `": network interface name` +
 		`Use "#5" format suffix to set led switching time (duration seconds). ` +
-		`E.g. "string:I_have_a_dream", "url:https://ipinfo.io/json#5"`
-	DEFAULT_OPTION      = OPTION_DATE + " " + OPTION_TIME_BLINK
+		`E.g. "string:I_have_a_dream", "url:https://ipinfo.io/json#5". Default: "` + DEFAULT_OPTION +
+		`". Multiple -option flags is allowed, in which case each one is considered as a profile. ` +
+		`Use SIGUSR1 signal to switch between profiles; use SIGUSR2 signal to toggle display off / on; ` +
+		`use SIGHUP signal to turn on display / refresh content`
+	DEFAULT_OPTION      = OPTION_DATE + " " + OPTION_TIME
 	DEFAULT_TIME_FORMAT = "15:04:05" // 28 width
 	DEFAULT_DATE_FORMAT = "01-02"
 	DEFAULT_IFNAME      = "wan"
+	DEFAULT_TEST_URL    = "http://www.google.com/generate_204"
 )
 
 type Option struct {
@@ -66,25 +79,39 @@ type ContentCache struct {
 	Expires time.Time
 }
 
+type stringArray []string
+
+func (i *stringArray) String() string {
+	return fmt.Sprint(*i)
+}
+
+func (i *stringArray) Set(value string) error {
+	*i = append(*i, value)
+	return nil
+}
+
 var (
 	OneShot      bool
 	Seconds      int
 	LightLevel   int
 	UrlCacheTime int
+	PidFile      string
 	StatusVar    string
-	OptionFlag   string
 	Text         string
 	Url          string
 	TempFlag     string
 	PrintStr     string
 	Ifname       string
+	TestUrl      string
+	OptionsFlags stringArray
 	Status       byte
-	Options      []*Option
+	Profiles     [][]*Option
+	ProfileIndex atomic.Int64 // current using profile index. or -1 to toggle off display
 	Location     *time.Location
 	Sm           *StatusManager
 
-	// key: option index
-	Cache = map[int]ContentCache{}
+	// key: arbitrary cache key
+	Cache = map[string]ContentCache{}
 )
 
 func main() {
@@ -97,11 +124,12 @@ func main() {
 		`Negative or zero value means no minimal cache time. It respects the url "Cache-Control" response header`)
 	flag.StringVar(&StatusVar, "status", "", "Space separated light-on side led list. Force light on these led. "+
 		`All Side led list (two each side, from top to bottom, left to right side): time medal upload download`)
-	flag.StringVar(&OptionFlag, "option", DEFAULT_OPTION, HELP_OPTION)
+	flag.Var(&OptionsFlags, "option", HELP_OPTION)
 	flag.StringVar(&Text, "value", "In God We Trust", `The "`+OPTION_TEXT+`" option: default text contents. `+
 		`Allowed chars: all visible ASCII chars, some special unicode symbols like `+
-		`♥ (heart), ☀ (sunny), ☾ (moon), ☁ (cloudy), 🌧 (rainy), ⛈ (thunderstorm), ❄ (snow), 🌫 (fog), `+
+		`♥ (heart), ☀ (sunny), ☾ (moon), ☁ (cloudy), ⛆ (little rain), 🌧 (rainy), ⛈ (thunderstorm), ❄ (snow), 🌫 (fog), `+
 		`←, →, ↑, ↓, ↗, ↘, ✓, ✗`)
+	flag.StringVar(&PidFile, "pidFile", "/var/run/athena-led.pid", `Write pid to file. Use /dev/null to disable`)
 	flag.StringVar(&Url, "url", "https://ipinfo.io/ip", `The "`+OPTION_URL+`" option: default http(s):// url`)
 	flag.StringVar(&TempFlag, "tempFlag", "4", `The "`+OPTION_TEMP+`" option: temperature type digits string. `+
 		`Possible digits: 0-6. Corresponding to "/sys/class/thermal/thermal_zone[0-6]". `+
@@ -109,15 +137,10 @@ func main() {
 		`E.g. "124" will display temperatures of thermal_zone 1, 2 and 4 in order`)
 	flag.StringVar(&Ifname, "ifname", "", `Default network interface name. `+
 		`If not set, it detects internet outlet interface automatically, fallbacks to "`+DEFAULT_IFNAME+`" if failed`)
+	flag.StringVar(&TestUrl, "testUrl", DEFAULT_TEST_URL, `The url to test internet connectivity. `+
+		`The url should return 204 status. Set to "`+NONE+`" to disable`)
 	flag.StringVar(&PrintStr, "print", "", "Debug: print string character graphes in terminal and exit")
 	flag.Parse()
-
-	if Ifname == "" {
-		Ifname, _ = GetWanInterface()
-		if Ifname == "" {
-			Ifname = DEFAULT_IFNAME
-		}
-	}
 
 	if PrintStr != "" {
 		for _, r := range strings.ToUpper(PrintStr) {
@@ -128,18 +151,18 @@ func main() {
 		return
 	}
 
-	screen, err := athenaLed.Init()
-	if err != nil {
-		fmt.Printf("Init error: %v\n", err)
-		return
+	if len(OptionsFlags) == 0 {
+		OptionsFlags = append(OptionsFlags, DEFAULT_OPTION)
 	}
-	defer func() {
-		err := screen.Destroy()
-		if err != nil {
-			fmt.Printf("DestroyExport error: %v\n", err)
+	if Ifname == "" {
+		Ifname, _ = GetWanInterface()
+		if Ifname == "" {
+			Ifname = DEFAULT_IFNAME
 		}
-	}()
-
+	}
+	if TestUrl == NONE {
+		TestUrl = ""
+	}
 	for _, item := range strings.Split(StatusVar, " ") {
 		item = strings.TrimSpace(item)
 		switch item {
@@ -153,13 +176,38 @@ func main() {
 			Status |= 8
 		}
 	}
-	for _, optionStr := range strings.Split(OptionFlag, " ") {
-		optionStr = strings.TrimSpace(optionStr)
-		if optionStr == "" {
-			continue
+	for _, optionsFlag := range OptionsFlags {
+		var options []*Option
+		for _, optionStr := range strings.Split(optionsFlag, " ") {
+			optionStr = strings.TrimSpace(optionStr)
+			if optionStr == "" {
+				continue
+			}
+			options = append(options, parseOption(optionStr))
 		}
-		Options = append(Options, parseOption(optionStr))
+		Profiles = append(Profiles, options)
 	}
+
+	if PidFile != "" && PidFile != os.DevNull {
+		pid := os.Getpid()
+		err := os.WriteFile(PidFile, []byte(strconv.Itoa(pid)), 0644)
+		if err != nil {
+			fmt.Printf("Error writing pid to file %s: %v\n", PidFile, err)
+			return
+		}
+	}
+
+	screen, err := athenaLed.Init()
+	if err != nil {
+		fmt.Printf("Init error: %v\n", err)
+		return
+	}
+	defer func() {
+		err := screen.Destroy()
+		if err != nil {
+			fmt.Printf("DestroyExport error: %v\n", err)
+		}
+	}()
 	err = screen.Power(true, byte(LightLevel))
 	if err != nil {
 		fmt.Printf("SetPower error: %v\n", err)
@@ -169,13 +217,13 @@ func main() {
 	if Location == nil {
 		Location = time.Local
 	}
-	fmt.Printf("tz=%s, status=%08b, seconds=%d, lightLevel=%d, text=%s, url=%s, option (%d): %s\n",
-		Location.String(), Status, Seconds, LightLevel, Text, Url, len(Options), OptionFlag)
-	Sm = NewStatusManager(Ifname, Options)
+	fmt.Printf("tz=%s, status=%08b, seconds=%d, lightLevel=%d, text=%s, url=%s, profiles (%d): %v\n",
+		Location.String(), Status, Seconds, LightLevel, Text, Url, len(OptionsFlags), OptionsFlags)
+	Sm = NewStatusManager(Ifname, TestUrl, Profiles)
 
 	// 信号处理设置
 	reloadCh := make(chan os.Signal, 1)
-	signal.Notify(reloadCh, syscall.SIGHUP)
+	signal.Notify(reloadCh, syscall.SIGHUP, SIGUSR1, SIGUSR2)
 
 	exitCh := make(chan os.Signal, 1)
 	signal.Notify(exitCh,
@@ -191,17 +239,6 @@ func main() {
 		syscall.SIGALRM,
 		syscall.SIGTERM)
 
-	if !OneShot {
-		go func() {
-			ticker := time.NewTicker(100 * time.Millisecond)
-			defer ticker.Stop()
-			for range ticker.C {
-				status := getStatus()
-				screen.Refresh(&status)
-			}
-		}()
-	}
-
 	// 主控制循环
 	for {
 		// 创建一个带取消功能的 context
@@ -209,22 +246,70 @@ func main() {
 
 		// 使用 WaitGroup 确保 mainLoop 完全退出后再重启，避免硬件竞争
 		var wg sync.WaitGroup
-		wg.Add(1)
 
-		// 新增：用于通知主线程 mainLoop 已经自然退出的通道
+		// 用于通知主线程 mainLoop 已经自然退出的通道
 		loopDone := make(chan struct{})
 
-		go func() {
-			defer wg.Done()
-			defer close(loopDone) // 任务结束时关闭通道
+		index := ProfileIndex.Load()
+		if index >= 0 {
+			screen.Power(true, byte(LightLevel))
 			go Sm.Run(ctx)
-			mainLoop(ctx, screen)
-		}()
+
+			// screen refresh goroutine
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				ticker := time.NewTicker(100 * time.Millisecond)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						status := getStatus()
+						screen.Refresh(&status)
+					}
+				}
+			}()
+
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer close(loopDone) // 任务结束时关闭通道
+				time.Sleep(time.Millisecond * 200)
+				mainLoop(ctx, screen, Profiles[index])
+			}()
+		} else {
+			screen.Power(false, 0)
+		}
 
 		// 等待信号 或 任务完成
 		select {
-		case <-reloadCh:
-			fmt.Println("Received SIGHUP. Refreshing display...")
+		case signal := <-reloadCh:
+			switch signal {
+			case SIGUSR1:
+				index := ProfileIndex.Load()
+				if index < 0 { // display is currently off. do nothing
+					continue
+				}
+				index = (index + 1) % int64(len(Profiles))
+				fmt.Printf("Received SIGUSR1, switch to profile %d\n", index)
+				ProfileIndex.Store(index)
+				screen.WriteData(fmt.Sprintf("P %d", index), getStatus())
+			case SIGUSR2:
+				if ProfileIndex.Load() < 0 {
+					fmt.Printf("Received SIGUSR2, turn on display\n")
+					ProfileIndex.Store(0)
+				} else {
+					fmt.Printf("Received SIGUSR2, turn off display\n")
+					ProfileIndex.Store(-1)
+				}
+			default: // SIGHUP
+				fmt.Printf("Received SIGHUP, reload\n")
+				if ProfileIndex.Load() < 0 {
+					ProfileIndex.Store(0)
+				}
+			}
 			cancel() // 通知 mainLoop 停止
 			// 注意：这里不需要 <-loopDone，因为 cancel 会导致 mainLoop 退出，随后 wg.Wait() 会处理同步
 		case <-exitCh:
@@ -255,20 +340,42 @@ func sleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-func mainLoop(ctx context.Context, screen *athenaLed.LedScreen) {
+func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Option) {
 	timeFlag := false
+	fmt.Printf("main loop start, %d options\n", len(options))
 	for {
 	optionLoop:
-		for i, option := range Options {
+		for i, option := range options {
 			// 在每个操作开始前检查 context 是否已取消
 			if ctx.Err() != nil {
 				return
 			}
-			returnAfterFinish := OneShot && i == len(Options)-1
+			returnAfterFinish := OneShot && i == len(options)-1
 			fmt.Printf("option: %v\n", option)
 			switch option.Type {
 			case OPTION_DATE:
-				formattedTime := time.Now().In(Location).Format(option.Value)
+				now := time.Now().In(Location)
+				formattedTime := now.Format(option.Value)
+				if option.Value == DEFAULT_DATE_FORMAT {
+					// "01-02" : 18 width
+					formattedTime += "    " // +4 = 22 width
+					switch now.Weekday() {
+					case 0: // Sunday
+						formattedTime += "７" // 6 width char. So the total is 28 width
+					case 1: // Monday
+						formattedTime += "１"
+					case 2:
+						formattedTime += "２"
+					case 3:
+						formattedTime += "３"
+					case 4:
+						formattedTime += "４"
+					case 5:
+						formattedTime += "５"
+					case 6:
+						formattedTime += "６"
+					}
+				}
 				screen.WriteData(formattedTime, getStatus())
 				if returnAfterFinish {
 					return
@@ -301,6 +408,20 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen) {
 						}
 					}
 				}
+			case OPTION_COUNTDOWN:
+				// 倒计时 option.Duration 秒。例如 5 秒则依次显示 5 4 3 2 1.
+				for remaining := option.Duration; remaining >= 0; remaining-- {
+					countdownStr := fmt.Sprintf("⏳ %d", remaining)
+					screen.WriteData(countdownStr, getStatus())
+					if returnAfterFinish && remaining == 0 {
+						return
+					}
+					if remaining > 0 {
+						if !sleep(ctx, time.Second/2) {
+							return
+						}
+					}
+				}
 			case OPTION_TEMP:
 				tempString := getTemp(option.Value)
 				if tempString == "" {
@@ -322,7 +443,7 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen) {
 					return
 				}
 			case OPTION_CPU:
-				cpuUsage, _, _, _, _ := Sm.Get(option.Value)
+				_, cpuUsage, _, _, _, _ := Sm.Get(option.Value)
 				displayStr := fmt.Sprintf("CPU %.1f%%", cpuUsage*100)
 				screen.WriteData(displayStr, getStatus())
 				if returnAfterFinish {
@@ -332,15 +453,16 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen) {
 					return
 				}
 			case OPTION_UPLOAD, OPTION_DOWNLOAD:
-				_, txRate, rxRate, _, _ := Sm.Get(option.Value)
+				_, _, txRate, rxRate, _, _ := Sm.Get(option.Value)
 				var displayStr string
 				if option.Value != Ifname {
 					displayStr = option.Value
 				}
 				if option.Type == OPTION_UPLOAD {
-					displayStr += "↑" + ByteCountIEC(int64(txRate))
+					// 不用 ↑。因为 ↗ 宽度更小。
+					displayStr += "↗" + ByteCountIEC(int64(txRate))
 				} else {
-					displayStr += "↓" + ByteCountIEC(int64(rxRate))
+					displayStr += "↘" + ByteCountIEC(int64(rxRate))
 				}
 				screen.WriteData(displayStr, getStatus())
 				if returnAfterFinish {
@@ -358,8 +480,8 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen) {
 				}
 			case OPTION_URL, OPTION_GET_BY_URL:
 				now := time.Now()
-				if now.Before(Cache[i].Expires) {
-					screen.WriteData(Cache[i].Data, getStatus())
+				if now.Before(Cache[option.Value].Expires) {
+					screen.WriteData(Cache[option.Value].Data, getStatus())
 					if returnAfterFinish {
 						return
 					}
@@ -404,12 +526,12 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen) {
 					if resExpires.After(expires) {
 						expires = resExpires
 					}
-					Cache[i] = ContentCache{
+					Cache[option.Value] = ContentCache{
 						Data:    body,
 						Expires: expires,
 					}
 				}
-				fmt.Printf("url %s body %q expires %s\n", option.Value, body, Cache[i].Expires)
+				fmt.Printf("url %s body %q expires %s\n", option.Value, body, Cache[option.Value].Expires)
 				screen.WriteData(body, getStatus())
 				if returnAfterFinish {
 					return
@@ -593,21 +715,27 @@ func runDino(parentCtx context.Context, screen *athenaLed.LedScreen, duration in
 }
 
 func getStatus() [4]float64 {
-	cpuUsage, _, _, upProb, dlProb := Sm.Get(Ifname)
+	netOk, cpuUsage, _, _, upProb, dlProb := Sm.Get(Ifname)
 	probs := [4]float64{0, 0, 0, 0}
-	// Bit 0: Time
-	if (Status & 1) != 0 {
-		probs[athenaLed.LedTime] = 1.0
-	}
-	// Bit 1: Medal (cpu)
-	if (Status & 2) == 0 {
+	// Bit 0: time (cpu)
+	if (Status & 1) == 0 {
 		// optional: 限制最大概率 (永远闪烁)
 		// CPU 10%: 概率 0.05 -> 极少闪烁。
 		// CPU 100%: 概率 0.5 -> 疯狂闪烁 (不会常亮)。
 		// cpuUsage *= 0.5
-		probs[athenaLed.LedMedal] = cpuUsage
+		probs[athenaLed.LedTime] = cpuUsage
 	} else {
-		probs[athenaLed.LedMedal] = 1.0
+		probs[athenaLed.LedTime] = 1.0
+	}
+	// Bit 1: medal (network ok)
+	if (Status & 2) == 0 {
+		if netOk {
+			probs[athenaLed.LedMedal] = 1.0
+		} else {
+			probs[athenaLed.LedMedal] = 0.0
+		}
+	} else {
+		probs[athenaLed.LedTime] = 1.0
 	}
 	// Bit 2: Upload
 	if (Status & 4) == 0 {

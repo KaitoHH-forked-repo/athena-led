@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -82,15 +84,19 @@ type StatusManager struct {
 	mu          sync.RWMutex
 	netStatuses map[string]*NetworkStatus
 	cpuMonitor  *CPUMonitor
+	testUrl     string
+	netOk       atomic.Bool
 }
 
-func NewStatusManager(ifname string, options []*Option) *StatusManager {
+func NewStatusManager(ifname string, testUrl string, profiles [][]*Option) *StatusManager {
 	netStatuses := map[string]*NetworkStatus{}
-	for _, opt := range options {
-		if opt.Type == OPTION_UPLOAD || opt.Type == OPTION_DOWNLOAD {
-			netStatuses[opt.Value] = &NetworkStatus{
-				ifname:   opt.Value,
-				lastTime: time.Now(),
+	for _, options := range profiles {
+		for _, opt := range options {
+			if opt.Type == OPTION_UPLOAD || opt.Type == OPTION_DOWNLOAD {
+				netStatuses[opt.Value] = &NetworkStatus{
+					ifname:   opt.Value,
+					lastTime: time.Now(),
+				}
 			}
 		}
 	}
@@ -101,27 +107,46 @@ func NewStatusManager(ifname string, options []*Option) *StatusManager {
 	return &StatusManager{
 		netStatuses: netStatuses,
 		cpuMonitor:  &CPUMonitor{},
+		testUrl:     testUrl,
 	}
 }
 
-func (sm *StatusManager) Get(ifname string) (cpuUsage, txRate, rxRate, upProb, dlProb float64) {
+func (sm *StatusManager) Get(ifname string) (netOk bool, cpuUsage, txRate, rxRate, upProb, dlProb float64) {
 	if ns, ok := sm.netStatuses[ifname]; ok {
 		sm.mu.RLock()
 		defer sm.mu.RUnlock()
-		return sm.cpuMonitor.usage, ns.txRate, ns.rxRate, ns.upProb, ns.dlProb
+		return sm.netOk.Load(), sm.cpuMonitor.usage, ns.txRate, ns.rxRate, ns.upProb, ns.dlProb
 	}
-	return 0, 0, 0, 0, 0
+	return sm.netOk.Load(), 0, 0, 0, 0, 0
 }
+
+// 默认每 60 秒测试一次外网连通性。如果成功则逐渐延长间隔
+const CHECK_NET_MIN_INTERVAL = 60
+const CHECK_NET_MAX_INTERVAL = 480
 
 // Run goroutine
 func (sm *StatusManager) Run(ctx context.Context) {
-	ticker := time.NewTicker(1 * time.Second) // 1秒更新一次
+	counter := 0
+	checkNetInterval := CHECK_NET_MIN_INTERVAL
+	ticker := time.NewTicker(time.Second) // 1s
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if sm.testUrl != "" && counter%checkNetInterval == 0 {
+				go func() {
+					res, err := http.Get(sm.testUrl)
+					if err != nil || res.StatusCode != 204 {
+						sm.netOk.Store(false)
+						checkNetInterval = CHECK_NET_MIN_INTERVAL
+						return
+					}
+					sm.netOk.Store(true)
+					checkNetInterval = min(checkNetInterval*2, CHECK_NET_MAX_INTERVAL)
+				}()
+			}
 			sm.mu.Lock()
 			sm.cpuMonitor.Update()
 			for _, ns := range sm.netStatuses {
@@ -130,6 +155,7 @@ func (sm *StatusManager) Run(ctx context.Context) {
 					ns.ifname, ByteCountIEC(int64(ns.txRate)), ns.upProb, ByteCountIEC(int64(ns.rxRate)), ns.dlProb)
 			}
 			sm.mu.Unlock()
+			counter++
 		}
 	}
 }

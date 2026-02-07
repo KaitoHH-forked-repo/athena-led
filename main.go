@@ -40,6 +40,7 @@ const (
 	OPTION_TEXT       = "text"
 	OPTION_STRING     = "string"
 	OPTION_CPU        = "cpu"      // cpu usage
+	OPTION_MEM        = "mem"      // memory usage
 	OPTION_UPLOAD     = "upload"   // network upload speed
 	OPTION_DOWNLOAD   = "download" // network download speed
 	OPTION_COUNTDOWN  = "countdown"
@@ -48,8 +49,8 @@ const (
 	OPTION_GET_BY_URL = "getByUrl" // reserved for compatibility
 
 	HELP_OPTION = `Space separated led options. Possible values: ` + OPTION_DATE + ", " + OPTION_TIME +
-		" (" + OPTION_TIME_BLINK + ")" + ", " + OPTION_TEXT + " (" + OPTION_STRING + ")" + ", " +
-		OPTION_DINO + ", " + OPTION_TEMP + ", " + OPTION_CPU + ", " + OPTION_UPLOAD + ", " + OPTION_DOWNLOAD + ", " +
+		" (" + OPTION_TIME_BLINK + ")" + ", " + OPTION_TEXT + " (" + OPTION_STRING + ")" + ", " + OPTION_DINO + ", " +
+		OPTION_TEMP + ", " + OPTION_CPU + ", " + OPTION_MEM + ", " + OPTION_UPLOAD + ", " + OPTION_DOWNLOAD + ", " +
 		OPTION_COUNTDOWN + ", " + OPTION_URL + " (" + OPTION_GET_BY_URL + "). " +
 		`Use ":value" format suffix to set optional option value (replace space with _), ` +
 		`values of each type option have different meanings: "` + OPTION_DATE + `", "` + OPTION_TIME + `", ` +
@@ -276,7 +277,6 @@ func main() {
 			go func() {
 				defer wg.Done()
 				defer close(loopDone) // 任务结束时关闭通道
-				time.Sleep(time.Millisecond * 200)
 				mainLoop(ctx, screen, Profiles[index])
 			}()
 		} else {
@@ -295,7 +295,6 @@ func main() {
 				index = (index + 1) % int64(len(Profiles))
 				fmt.Printf("Received SIGUSR1, switch to profile %d\n", index)
 				ProfileIndex.Store(index)
-				screen.WriteData(fmt.Sprintf("P %d", index), getStatus())
 			case SIGUSR2:
 				if ProfileIndex.Load() < 0 {
 					fmt.Printf("Received SIGUSR2, turn on display\n")
@@ -341,24 +340,22 @@ func sleep(ctx context.Context, d time.Duration) bool {
 }
 
 func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Option) {
-	timeFlag := false
 	fmt.Printf("main loop start, %d options\n", len(options))
+	timeFlag := false
 	for {
-	optionLoop:
-		for i, option := range options {
+		for _, option := range options {
 			// 在每个操作开始前检查 context 是否已取消
 			if ctx.Err() != nil {
 				return
 			}
-			returnAfterFinish := OneShot && i == len(options)-1
 			fmt.Printf("option: %v\n", option)
 			switch option.Type {
 			case OPTION_DATE:
 				now := time.Now().In(Location)
 				formattedTime := now.Format(option.Value)
 				if option.Value == DEFAULT_DATE_FORMAT {
-					// "01-02" : 18 width
-					formattedTime += "    " // +4 = 22 width
+					// "01-02" : 19 width
+					formattedTime += "   " // +3 = 22 width
 					switch now.Weekday() {
 					case 0: // Sunday
 						formattedTime += "７" // 6 width char. So the total is 28 width
@@ -377,49 +374,33 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 					}
 				}
 				screen.WriteData(formattedTime, getStatus())
-				if returnAfterFinish {
-					return
-				}
 				if !sleep(ctx, time.Duration(option.Duration)*time.Second) {
 					return
 				}
 			case OPTION_TIME, OPTION_TIME_BLINK:
-				// 创建子 context，同时监听父 context 的取消
-				subCtx, subCancel := context.WithTimeout(ctx, time.Duration(option.Duration)*time.Second)
-				for {
-					select {
-					case <-subCtx.Done(): // 超时或父 context 取消
-						subCancel()
-						continue optionLoop
-					default:
-						formattedTime := time.Now().In(Location).Format(option.Value)
-						// 默认时间格式显示秒，所以 : 不需要闪烁
-						if option.Value != DEFAULT_TIME_FORMAT {
-							if timeFlag {
-								// ":" is 2 columns width, while a single space is 1 column width.
-								formattedTime = strings.ReplaceAll(formattedTime, ":", "  ")
-							}
-							timeFlag = !timeFlag
+				// 使用小于1s的刷新间隔保证秒的数字一直变化
+				for range option.Duration * 2 {
+					formattedTime := time.Now().In(Location).Format(option.Value)
+					// 默认时间格式显示秒，所以 : 不需要闪烁
+					if option.Value != DEFAULT_TIME_FORMAT {
+						if timeFlag {
+							// ":" is 2 columns width, while a single space is 1 column width.
+							formattedTime = strings.ReplaceAll(formattedTime, ":", "  ")
 						}
-						screen.WriteData(formattedTime, getStatus())
-						if !sleep(ctx, time.Second/2) { // 使用小于1s的刷新间隔保证秒的数字一直变化
-							subCancel()
-							return // 如果是父 context 取消，直接从 mainLoop 返回
-						}
+						timeFlag = !timeFlag
+					}
+					screen.WriteData(formattedTime, getStatus())
+					if !sleep(ctx, time.Second/2) {
+						return
 					}
 				}
 			case OPTION_COUNTDOWN:
 				// 倒计时 option.Duration 秒。例如 5 秒则依次显示 5 4 3 2 1.
-				for remaining := option.Duration; remaining >= 0; remaining-- {
-					countdownStr := fmt.Sprintf("⏳ %d", remaining)
+				for i := range option.Duration {
+					countdownStr := fmt.Sprintf("⏳ %d", option.Duration-i)
 					screen.WriteData(countdownStr, getStatus())
-					if returnAfterFinish && remaining == 0 {
+					if !sleep(ctx, time.Second) {
 						return
-					}
-					if remaining > 0 {
-						if !sleep(ctx, time.Second/2) {
-							return
-						}
 					}
 				}
 			case OPTION_TEMP:
@@ -428,63 +409,61 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 					continue
 				}
 				screen.WriteData(tempString, getStatus())
-				if returnAfterFinish {
-					return
-				}
 				if !sleep(ctx, time.Duration(option.Duration)*time.Second) {
 					return
 				}
 			case OPTION_TEXT, OPTION_STRING:
 				screen.WriteData(option.Value, getStatus())
-				if returnAfterFinish {
-					return
-				}
 				if !sleep(ctx, time.Duration(option.Duration)*time.Second) {
 					return
 				}
 			case OPTION_CPU:
-				_, cpuUsage, _, _, _, _ := Sm.Get(option.Value)
-				displayStr := fmt.Sprintf("CPU %.1f%%", cpuUsage*100)
-				screen.WriteData(displayStr, getStatus())
-				if returnAfterFinish {
-					return
+				for range option.Duration {
+					_, cpuUsage, _, _, _, _, _ := Sm.Get(option.Value)
+					displayStr := fmt.Sprintf("CPU %02d", min(int(cpuUsage*100), 99))
+					screen.WriteData(displayStr, getStatus())
+					if !sleep(ctx, time.Second) {
+						return
+					}
 				}
-				if !sleep(ctx, time.Duration(option.Duration)*time.Second) {
-					return
+			case OPTION_MEM:
+				for range option.Duration {
+					_, _, memUsage, _, _, _, _ := Sm.Get(option.Value)
+					displayStr := fmt.Sprintf("MEM %02d", min(int(memUsage*100), 99))
+					screen.WriteData(displayStr, getStatus())
+					if !sleep(ctx, time.Second) {
+						return
+					}
 				}
 			case OPTION_UPLOAD, OPTION_DOWNLOAD:
-				_, _, txRate, rxRate, _, _ := Sm.Get(option.Value)
-				var displayStr string
-				if option.Value != Ifname {
-					displayStr = option.Value
-				}
-				if option.Type == OPTION_UPLOAD {
-					// 不用 ↑。因为 ↗ 宽度更小。
-					displayStr += "↗" + ByteCountIEC(int64(txRate))
-				} else {
-					displayStr += "↘" + ByteCountIEC(int64(rxRate))
-				}
-				screen.WriteData(displayStr, getStatus())
-				if returnAfterFinish {
-					return
-				}
-				if !sleep(ctx, time.Duration(option.Duration)*time.Second) {
-					return
+				for range option.Duration {
+					_, _, _, txRate, rxRate, _, _ := Sm.Get(option.Value)
+					var displayStr string
+					if option.Value != Ifname {
+						displayStr = option.Value
+					}
+					if option.Type == OPTION_UPLOAD {
+						// 不用 ↑。因为 ↗ 宽度更小。
+						displayStr += "↗ " + ByteCountIEC(int64(txRate))
+					} else {
+						displayStr += "↘ " + ByteCountIEC(int64(rxRate))
+					}
+					screen.WriteData(displayStr, getStatus())
+					if !sleep(ctx, time.Second) {
+						return
+					}
 				}
 			case OPTION_DINO:
 				// 传入 context 以便中断循环
 				runDino(ctx, screen, option.Duration)
 				// 检查是否因为 context 取消而返回的
-				if ctx.Err() != nil || returnAfterFinish {
+				if ctx.Err() != nil {
 					return
 				}
 			case OPTION_URL, OPTION_GET_BY_URL:
 				now := time.Now()
 				if now.Before(Cache[option.Value].Expires) {
 					screen.WriteData(Cache[option.Value].Data, getStatus())
-					if returnAfterFinish {
-						return
-					}
 					if !sleep(ctx, time.Duration(option.Duration)*time.Second) {
 						return
 					}
@@ -533,9 +512,6 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 				}
 				fmt.Printf("url %s body %q expires %s\n", option.Value, body, Cache[option.Value].Expires)
 				screen.WriteData(body, getStatus())
-				if returnAfterFinish {
-					return
-				}
 				if !sleep(ctx, time.Duration(option.Duration)*time.Second) {
 					return
 				}
@@ -715,7 +691,7 @@ func runDino(parentCtx context.Context, screen *athenaLed.LedScreen, duration in
 }
 
 func getStatus() [4]float64 {
-	netOk, cpuUsage, _, _, upProb, dlProb := Sm.Get(Ifname)
+	netOk, cpuUsage, _, _, _, upProb, dlProb := Sm.Get(Ifname)
 	probs := [4]float64{0, 0, 0, 0}
 	// Bit 0: time (cpu)
 	if (Status & 1) == 0 {

@@ -83,7 +83,7 @@ func (nr *NetworkStatus) Update() error {
 type StatusManager struct {
 	mu          sync.RWMutex
 	netStatuses map[string]*NetworkStatus
-	cpuMonitor  *CPUMonitor
+	sysMonitor  *SysMonitor
 	testUrl     string
 	netOk       atomic.Bool
 }
@@ -106,18 +106,18 @@ func NewStatusManager(ifname string, testUrl string, profiles [][]*Option) *Stat
 	}
 	return &StatusManager{
 		netStatuses: netStatuses,
-		cpuMonitor:  &CPUMonitor{},
+		sysMonitor:  &SysMonitor{},
 		testUrl:     testUrl,
 	}
 }
 
-func (sm *StatusManager) Get(ifname string) (netOk bool, cpuUsage, txRate, rxRate, upProb, dlProb float64) {
+func (sm *StatusManager) Get(ifname string) (netOk bool, cpuUsage, memUsage, txRate, rxRate, upProb, dlProb float64) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
 	if ns, ok := sm.netStatuses[ifname]; ok {
-		sm.mu.RLock()
-		defer sm.mu.RUnlock()
-		return sm.netOk.Load(), sm.cpuMonitor.usage, ns.txRate, ns.rxRate, ns.upProb, ns.dlProb
+		return sm.netOk.Load(), sm.sysMonitor.cpuUsage, sm.sysMonitor.memUsage, ns.txRate, ns.rxRate, ns.upProb, ns.dlProb
 	}
-	return sm.netOk.Load(), 0, 0, 0, 0, 0
+	return sm.netOk.Load(), sm.sysMonitor.cpuUsage, sm.sysMonitor.memUsage, 0, 0, 0, 0
 }
 
 // 默认每 60 秒测试一次外网连通性。如果成功则逐渐延长间隔
@@ -148,11 +148,12 @@ func (sm *StatusManager) Run(ctx context.Context) {
 				}()
 			}
 			sm.mu.Lock()
-			sm.cpuMonitor.Update()
+			if counter%5 == 0 {
+				sm.sysMonitor.updateCpu()
+				sm.sysMonitor.updateMemory()
+			}
 			for _, ns := range sm.netStatuses {
 				ns.Update()
-				fmt.Printf("CPU: %.1f; Interface %s speed: ↑ %s (%.2f), ↓ %s(%.2f)\n", sm.cpuMonitor.usage,
-					ns.ifname, ByteCountIEC(int64(ns.txRate)), ns.upProb, ByteCountIEC(int64(ns.rxRate)), ns.dlProb)
 			}
 			sm.mu.Unlock()
 			counter++
@@ -255,28 +256,30 @@ func parseDevName(output string) string {
 }
 
 // ByteCountIEC converts bytes to IEC units (KB, MB, GB, etc.) string.
-// E.g. 1024 => "1 KB".
+// E.g. 1024 => "1.0 K".
 func ByteCountIEC(b int64) string {
 	const unit = 1024
 	if b < unit {
 		return fmt.Sprintf("%d B", b)
 	}
 	div, exp := int64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
+	// 为了节省宽度，将 "100.0 K" 显示为 "0.1 M"
+	for n := b / unit; n >= 100; n /= unit {
 		div *= unit
 		exp++
 	}
-	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+	return fmt.Sprintf("%.1f %c", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
-type CPUMonitor struct {
+type SysMonitor struct {
 	lastTotal uint64
 	lastIdle  uint64
 	// 当前 CPU 整体使用率 (范围 0.0 - 1.0)
-	usage float64
+	cpuUsage float64
+	memUsage float64
 }
 
-func (c *CPUMonitor) Update() error {
+func (sm *SysMonitor) updateCpu() error {
 	file, err := os.Open("/proc/stat")
 	if err != nil {
 		return err
@@ -323,18 +326,80 @@ func (c *CPUMonitor) Update() error {
 	}
 
 	// 计算差值
-	totalDelta := total - c.lastTotal
-	idleDelta := idle - c.lastIdle
+	totalDelta := total - sm.lastTotal
+	idleDelta := idle - sm.lastIdle
 
 	// 更新状态
-	c.lastTotal = total
-	c.lastIdle = idle
+	sm.lastTotal = total
+	sm.lastIdle = idle
 
 	if totalDelta == 0 {
 		return nil
 	}
 
 	// 使用率 = (总时间增量 - 空闲时间增量) / 总时间增量
-	c.usage = float64(totalDelta-idleDelta) / float64(totalDelta)
+	sm.cpuUsage = float64(totalDelta-idleDelta) / float64(totalDelta)
+	return nil
+}
+
+func (sm *SysMonitor) updateMemory() error {
+	file, err := os.Open("/proc/meminfo")
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	var total, available, free, buffers, cached float64
+	// We track if we found MemAvailable because older kernels don't have it
+	foundAvailable := false
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fields := strings.Fields(line)
+
+		if len(fields) < 2 {
+			continue
+		}
+
+		key := fields[0]
+		// Parse the value (kB)
+		val, err := strconv.ParseFloat(fields[1], 64)
+		if err != nil {
+			continue
+		}
+
+		switch key {
+		case "MemTotal:":
+			total = val
+		case "MemAvailable:":
+			available = val
+			foundAvailable = true
+		case "MemFree:":
+			free = val
+		case "Buffers:":
+			buffers = val
+		case "Cached:":
+			cached = val
+		}
+	}
+
+	if total == 0 {
+		return fmt.Errorf("could not determine total memory")
+	}
+
+	// Calculate Used Memory
+	var used float64
+	if foundAvailable {
+		// Modern Linux (Best Accuracy)
+		// Used = Total - Available
+		used = total - available
+	} else {
+		// Fallback for older kernels (Pre 3.14)
+		// Used = Total - (Free + Buffers + Cached)
+		used = total - (free + buffers + cached)
+	}
+
+	sm.memUsage = used / total
 	return nil
 }

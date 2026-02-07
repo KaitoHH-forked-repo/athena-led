@@ -25,7 +25,7 @@ type LedScreen struct {
 	leftScreen   *ledScreenUnit
 	rightScreen  *ledScreenUnit
 	mu           sync.Mutex // 互斥锁，保护 GPIO 操作
-	currentData  []byte     // 缓存当前屏幕显示的像素数据 (27 bytes)
+	currentData  []byte     // 缓存当前屏幕显示的像素数据, WIDTH size slice
 	currentProbs [4]float64 // 缓存当前 4 个灯的概率状态
 }
 
@@ -33,9 +33,11 @@ func Init() (screen *LedScreen, err error) {
 	stbLeft, stbRight, clk, dio, err := getGpioPin()
 	if err != nil {
 		fmt.Printf("getGpioPin error: %v\n", err)
-		return
+		return nil, err
 	}
-	screen = &LedScreen{}
+	screen = &LedScreen{
+		currentData: make([]byte, WIDTH),
+	}
 	leftScreen := &ledScreenUnit{
 		stb: stbLeft,
 		clk: clk,
@@ -44,7 +46,7 @@ func Init() (screen *LedScreen, err error) {
 	err = leftScreen.initGpio()
 	if err != nil {
 		fmt.Printf("getGpioPin error: %v\n", err)
-		return
+		return nil, err
 	}
 	rightScreen := &ledScreenUnit{
 		stb: stbRight,
@@ -54,21 +56,22 @@ func Init() (screen *LedScreen, err error) {
 	err = rightScreen.initGpio()
 	if err != nil {
 		fmt.Printf("getGpioPin error: %v\n", err)
-		return
+		return nil, err
 	}
 	screen.leftScreen = leftScreen
 	screen.rightScreen = rightScreen
 	err = screen.SetShowModel()
 	if err != nil {
 		fmt.Printf("SetShowModel error: %v\n", err)
-		return
+		return nil, err
 	}
 
 	err = screen.SetDataModel()
 	if err != nil {
 		fmt.Printf("SetDataModel error: %v\n", err)
+		return nil, err
 	}
-	return
+	return screen, nil
 }
 
 func getGpioPin() (stbLeft, stbRight, clk, dio int, err error) {
@@ -78,7 +81,7 @@ func getGpioPin() (stbLeft, stbRight, clk, dio int, err error) {
 		return 581, 582, 585, 586, nil
 	}
 	defer func(file *os.File) {
-		_ = file.Close()
+		file.Close()
 	}(file)
 
 	scanner := bufio.NewScanner(file)
@@ -107,10 +110,10 @@ func getGpioPin() (stbLeft, stbRight, clk, dio int, err error) {
 func (screen *LedScreen) Destroy() error {
 	screen.mu.Lock()
 	defer screen.mu.Unlock()
-	_ = screen.Power(false, 0)
-	_ = screen.doWriteData([]byte{}, 0b00000000)
+	screen.Power(false, 0)
+	screen.doWriteData(make([]byte, WIDTH), 0b00000000)
 	for index := range fileDict {
-		_ = fileDict[index].Close()
+		fileDict[index].Close()
 	}
 	err := screen.leftScreen.destroyGpio()
 	if err != nil {
@@ -162,18 +165,10 @@ func (screen *LedScreen) WriteData(str string, statusProbs [4]float64) {
 	if len(data) == WIDTH+1 {
 		data = data[:WIDTH]
 	}
-	length := len(data)
-	if length > WIDTH {
-		// 滚动模式比较特殊，滚动时通常不建议高频刷新灯光，或者需要在滚动内部处理
-		// 这里暂且简化，滚动时不缓存 data
+	if len(data) > WIDTH {
 		screen.flow(data, statusProbs)
 	} else {
-		// 静态显示：填充数据
-		paddedData := make([]byte, WIDTH)
-		offset := (27 - length) / 2
-		copy(paddedData[offset:], data)
-		// 调用底层写入
-		screen.writeRawData(paddedData, statusProbs)
+		screen.writeRawData(data, statusProbs)
 	}
 }
 
@@ -184,18 +179,15 @@ func (screen *LedScreen) WriteRawData(data []byte, statusProbs [4]float64) {
 }
 
 func (screen *LedScreen) writeRawData(data []byte, statusProbs [4]float64) {
-	// 1. 深拷贝缓存当前数据（供 Refresh 使用）
-	if len(screen.currentData) != WIDTH {
-		screen.currentData = make([]byte, WIDTH)
+	paddedData := make([]byte, WIDTH)
+	// 居中显示
+	offset := 0
+	if len(data) < WIDTH {
+		offset = (27 - len(data)) / 2
 	}
-	// 确保输入数据长度正确
-	inputLen := min(len(data), WIDTH)
-	copy(screen.currentData, data[:inputLen])
-
-	// 2. 缓存灯光概率
+	copy(paddedData[offset:], data)
+	screen.currentData = paddedData
 	screen.currentProbs = statusProbs
-
-	// 3. 执行真正的硬件写入
 	screen.flush()
 }
 
@@ -205,12 +197,9 @@ func (screen *LedScreen) writeRawData(data []byte, statusProbs [4]float64) {
 func (screen *LedScreen) Refresh(probs *[4]float64) {
 	screen.mu.Lock()
 	defer screen.mu.Unlock()
-
 	if probs != nil {
 		screen.currentProbs = *probs
 	}
-
-	// 立即刷新硬件
 	screen.flush()
 }
 
@@ -241,7 +230,7 @@ func (screen *LedScreen) flush() {
 	// 注意：这里直接调用 leftScreen/rightScreen 的方法
 	// 确保 ledScreenUnit 的操作是原子的或者受外层锁保护
 	// 假设 screen.leftScreen.printf 等方法内部没有锁，由 LedScreen 统一管理
-	_ = screen.doWriteData(screen.currentData, statusByte)
+	screen.doWriteData(screen.currentData, statusByte)
 }
 
 // 辅助函数：根据概率返回 true/false
@@ -255,49 +244,24 @@ func shouldLight(prob float64) bool {
 	return rand.Float64() < prob
 }
 
-func probs2Status(Probs [4]float64) byte {
-	var status byte = 0
-	prob := rand.Float64()
-	if Probs[LedTime] >= prob {
-		status |= 1
-	}
-	if Probs[LedMedal] >= prob {
-		status |= 2
-	}
-	if Probs[LedUpload] >= prob {
-		status |= 4
-	}
-	if Probs[LedDownload] >= prob {
-		status |= 8
-	}
-	return status
-}
-
 // 滚动显示
 func (screen *LedScreen) flow(data []byte, statusProbs [4]float64) {
+	screen.currentProbs = statusProbs
 	start := 0
 	for i := 1; i <= len(data); i++ {
-		off := [WIDTH]byte{}
+		off := make([]byte, WIDTH)
 		if i-WIDTH > 0 {
 			start++
 		}
 		copy(off[:], data[start:i])
-		err := screen.doWriteData(off[:], probs2Status(statusProbs))
-		if err != nil {
-			fmt.Printf("something error: %v\n", err)
-			return
-		}
+		screen.currentData = off
+		screen.flush()
 		time.Sleep(128 * time.Millisecond)
 	}
 }
 
+// value : a slice of WIDTH bytes
 func (screen *LedScreen) doWriteData(values []byte, status byte) error {
-	if len(values) < WIDTH {
-		tmp := make([]byte, WIDTH)
-		copy(tmp, values)
-		values = tmp
-	}
-
 	err := screen.leftScreen.printf(values[:14])
 	if err != nil {
 		return err

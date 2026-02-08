@@ -1,5 +1,6 @@
 - [athena-led](#athena-led)
   - [按键控制](#按键控制)
+  - [使用示例](#使用示例)
   - [构建](#构建)
 
 # athena-led
@@ -33,7 +34,7 @@
   - `temp:24` : 显示区域 2 (`/sys/class/thermal/thermal_zone2`) 和 4 (`/sys/class/thermal/thermal_zone4`) 的温度。
   - `dino#15` : 显示 15秒的恐龙动画。
 - 支持重复传入多个 `-option` 参数。每个参数作为一个 Profile。程序启动后默认使用第一个 Profile。
-- 支持通过 signal 信号控制程序。例如：`kill -SIGUSR1 $(cat /var/run/athena-led.pid )`。
+- 支持通过 signal 信号控制程序。例如：`kill -SIGUSR1 $(cat /var/run/athena-led.pid )`。程序启动后会写入该 pid 文件。
   - `SIGUSR1` : 切换使用的 Profile。
   - `SIGUSR2` : 切换屏幕的关闭 / 打开状态。
   - `SIGHUP` : 打开屏幕 / 刷新屏幕内容。
@@ -43,7 +44,7 @@
 使用方法：下载 `athena-led` 可执行文件然后放到 `/usr/sbin/athena-led`
 (替换原文件)即可。本程序命令行参数与原版保持兼容，所以仍然可以用
 [luci-app-athena-led](https://github.com/NONGFAH/luci-app-athena-led) 控制。但一些新特性需要手动编辑
-`/etc/config/athena_led` 里的参数才能启用，无法在 OpenWrt Web UI 里配置。
+`/etc/config/athena_led` 和/或 `/etc/init.d/athena_led` 文件里的参数才能启用，无法通过 luci / Web UI 设置。
 
 运行 `athena-led -h` 查看详细帮助。
 
@@ -75,6 +76,24 @@ fi
 
 - 短按 `BTN_0` 按键：切换屏幕显示内容。
 - 长按 `BTN_0` 按键 2 秒：关闭或打开屏幕。注意长按触发 `timeout` 事件的所需秒数由脚本里 `pressed` 事件的返回值决定。
+
+## 使用示例
+
+修改 `/etc/init.d/athena_led`, 将 `procd_set_param` 行内容改为：
+
+```
+procd_set_param command $PROG -seconds 5 -option "date#2 time:15:04#2 url upload#2 cpu#2 mem#2" -option time -option upload -url "https://ipinfo.io/ip" -tempFlag "4"
+```
+
+以上传入了3个 `-option` 参数设置了 3 个 Profile:
+
+- Profile 0 (默认): 显示2秒日期、然后显示2秒时间、显示5秒 https://ipinfo.io/ip 内容、显示2秒上传速度、显示2秒CPU占用率、最后显示2秒内存占用率。然后循环回到开始。
+- Profile 1 : 一直显示时间。
+- Profile 2 : 一直显示上传速度。
+
+默认使用第一个 Profile。通过设备顶部的按键切换其他 Profile。也可以自己写脚本发送 signal 控制。
+
+修改后需要 `service athena_led restart` 重启服务。
 
 ## 构建
 

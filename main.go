@@ -53,8 +53,8 @@ const (
 		OPTION_TEMP + ", " + OPTION_CPU + ", " + OPTION_MEM + ", " + OPTION_UPLOAD + ", " + OPTION_DOWNLOAD + ", " +
 		OPTION_COUNTDOWN + ", " + OPTION_URL + " (" + OPTION_GET_BY_URL + "). " +
 		`Use ":value" format suffix to set optional option value (replace space with _), ` +
-		`values of each type option have different meanings: "` + OPTION_DATE + `", "` + OPTION_TIME + `", ` +
-		OPTION_TIME_BLINK + `": Go time format layout, e.g. "` + DEFAULT_DATE_FORMAT + `" or "` + DEFAULT_TIME_FORMAT +
+		`values of each type option have different meanings: "` + OPTION_DATE + `", "` + OPTION_TIME + `": ` +
+		`Go time format layout, e.g. "` + DEFAULT_DATE_FORMAT + `" or "` + DEFAULT_TIME_FORMAT +
 		`"; "` + OPTION_TEMP + `": temperature type digits string; "` + OPTION_TEXT + `": text contents; "` + OPTION_URL +
 		`": the http(s):// url; "` + OPTION_UPLOAD + `", "` + OPTION_DOWNLOAD + `": network interface name` +
 		`Use "#5" format suffix to set led switching time (duration seconds). ` +

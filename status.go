@@ -256,7 +256,9 @@ func parseDevName(output string) string {
 }
 
 // ByteCountIEC converts bytes to IEC units (KB, MB, GB, etc.) string.
-// E.g. 1024 => "1.0 K".
+// The returned string consists of at most 3 digits, possibly 1 dot, 1 space, and 1 unit char.
+// E.g. 1024 => "1.0 K"; 1024 * 75 => "75.0 K"; 1024 * 150 => "150 K".
+// The max width in display is 21.
 func ByteCountIEC(b int64) string {
 	const unit = 1024
 	if b < unit {
@@ -268,7 +270,11 @@ func ByteCountIEC(b int64) string {
 		div *= unit
 		exp++
 	}
-	return fmt.Sprintf("%.1f %c", float64(b)/float64(div), "KMGTPE"[exp])
+	value := float64(b) / float64(div)
+	if value >= 100 {
+		return fmt.Sprintf("%f %c", value, "KMGTPE"[exp])
+	}
+	return fmt.Sprintf("%.1f %c", value, "KMGTPE"[exp])
 }
 
 type SysMonitor struct {

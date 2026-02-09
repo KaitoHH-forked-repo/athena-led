@@ -37,7 +37,7 @@
 - 支持通过 signal 信号控制程序。例如：`kill -SIGUSR1 $(cat /var/run/athena-led.pid )`。程序启动后会写入该 pid 文件。
   - `SIGUSR1` : 切换使用的 Profile。
   - `SIGUSR2` : 切换屏幕的关闭 / 打开状态。
-  - `SIGHUP` : 打开屏幕 / 刷新屏幕内容。
+  - `SIGHUP` : 打开屏幕 / 重置为使用默认 Profile。
 - 支持通过 `TZ` 环境变量修改显示的日期/时间的时区。
 - 通过 url 获取的显示内容默认缓存至少 60 秒；支持通过 `Cache-Control` 响应头设置缓存有效期。
 
@@ -87,7 +87,7 @@ procd_set_param command $PROG -seconds 5 -option "date#2 time:15:04#2 url upload
 
 以上传入了3个 `-option` 参数设置了 3 个 Profile:
 
-- Profile 0 (默认): 显示2秒日期、然后显示2秒时间、显示5秒 https://ipinfo.io/ip 内容、显示2秒上传速度、显示2秒CPU占用率、最后显示2秒内存占用率。然后循环回到开始。
+- Profile 0 (默认): 显示2秒日期、然后显示2秒 15:04 格式的时间、显示5秒 https://ipinfo.io/ip 内容、显示2秒上传速度、显示2秒CPU占用率、最后显示2秒内存占用率。然后循环回到开始。
 - Profile 1 : 一直显示时间。
 - Profile 2 : 一直显示上传速度。
 

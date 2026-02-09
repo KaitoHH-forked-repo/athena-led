@@ -153,7 +153,8 @@ func (screen *LedScreen) Power(run bool, lightLevel byte) error {
 }
 
 // 最多可以写入 WIDTH + 1 宽度的字符串而不需要滚动。
-func (screen *LedScreen) WriteData(str string, statusProbs [4]float64) {
+// It return true if the text is display in flow.
+func (screen *LedScreen) WriteData(str string, statusProbs [4]float64) (flow bool, takenTime time.Duration) {
 	str = strings.ToUpper(str)
 	data := make([]byte, 0)
 	for _, item := range str {
@@ -165,10 +166,13 @@ func (screen *LedScreen) WriteData(str string, statusProbs [4]float64) {
 	if len(data) == WIDTH+1 {
 		data = data[:WIDTH]
 	}
+	start := time.Now()
 	if len(data) > WIDTH {
 		screen.flow(data, statusProbs)
+		return true, time.Since(start)
 	} else {
 		screen.writeRawData(data, statusProbs)
+		return false, time.Since(start)
 	}
 }
 

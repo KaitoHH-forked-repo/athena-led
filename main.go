@@ -23,7 +23,7 @@ import (
 	athenaLed "athenaLed/internal"
 )
 
-const Version = "v0.1.3"
+const Version = "v0.1.4-dev"
 
 // syscall.SIGUSR1 & SIGUSR2 only available in Linux. But we are developping in Windows desktop
 // https://man7.org/linux/man-pages/man7/signal.7.html
@@ -305,9 +305,7 @@ func main() {
 				}
 			default: // SIGHUP
 				fmt.Printf("Received SIGHUP, reload\n")
-				if ProfileIndex.Load() < 0 {
-					ProfileIndex.Store(0)
-				}
+				ProfileIndex.Store(0)
 			}
 			cancel() // 通知 mainLoop 停止
 			// 注意：这里不需要 <-loopDone，因为 cancel 会导致 mainLoop 退出，随后 wg.Wait() 会处理同步
@@ -373,13 +371,11 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 						formattedTime += "６"
 					}
 				}
-				screen.WriteData(formattedTime, getStatus())
-				if !sleep(ctx, time.Duration(option.Duration)*time.Second) {
+				if !displayText(ctx, screen, formattedTime, time.Duration(option.Duration)*time.Second) {
 					return
 				}
 			case OPTION_TIME, OPTION_TIME_BLINK:
-				// 使用小于1s的刷新间隔保证秒的数字一直变化
-				for range option.Duration * 2 {
+				for range option.Duration {
 					formattedTime := time.Now().In(Location).Format(option.Value)
 					// 默认时间格式显示秒，所以 : 不需要闪烁
 					if option.Value != DEFAULT_TIME_FORMAT {
@@ -389,8 +385,7 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 						}
 						timeFlag = !timeFlag
 					}
-					screen.WriteData(formattedTime, getStatus())
-					if !sleep(ctx, time.Second/2) {
+					if !displayText(ctx, screen, formattedTime, time.Second) {
 						return
 					}
 				}
@@ -398,8 +393,7 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 				// 倒计时 option.Duration 秒。例如 5 秒则依次显示 5 4 3 2 1.
 				for i := range option.Duration {
 					countdownStr := fmt.Sprintf("⏳ %d", option.Duration-i)
-					screen.WriteData(countdownStr, getStatus())
-					if !sleep(ctx, time.Second) {
+					if !displayText(ctx, screen, countdownStr, time.Second) {
 						return
 					}
 				}
@@ -408,21 +402,18 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 				if tempString == "" {
 					continue
 				}
-				screen.WriteData(tempString, getStatus())
-				if !sleep(ctx, time.Duration(option.Duration)*time.Second) {
+				if !displayText(ctx, screen, tempString, time.Duration(option.Duration)*time.Second) {
 					return
 				}
 			case OPTION_TEXT, OPTION_STRING:
-				screen.WriteData(option.Value, getStatus())
-				if !sleep(ctx, time.Duration(option.Duration)*time.Second) {
+				if !displayText(ctx, screen, option.Value, time.Duration(option.Duration)*time.Second) {
 					return
 				}
 			case OPTION_CPU:
 				for range option.Duration {
 					_, cpuUsage, _, _, _, _, _ := Sm.Get(option.Value)
 					displayStr := fmt.Sprintf("CPU %02d", min(int(cpuUsage*100), 99))
-					screen.WriteData(displayStr, getStatus())
-					if !sleep(ctx, time.Second) {
+					if !displayText(ctx, screen, displayStr, time.Second) {
 						return
 					}
 				}
@@ -430,8 +421,7 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 				for range option.Duration {
 					_, _, memUsage, _, _, _, _ := Sm.Get(option.Value)
 					displayStr := fmt.Sprintf("MEM %02d", min(int(memUsage*100), 99))
-					screen.WriteData(displayStr, getStatus())
-					if !sleep(ctx, time.Second) {
+					if !displayText(ctx, screen, displayStr, time.Second) {
 						return
 					}
 				}
@@ -448,8 +438,7 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 					} else {
 						displayStr += "↘ " + ByteCountIEC(int64(rxRate))
 					}
-					screen.WriteData(displayStr, getStatus())
-					if !sleep(ctx, time.Second) {
+					if !displayText(ctx, screen, displayStr, time.Second) {
 						return
 					}
 				}
@@ -463,8 +452,7 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 			case OPTION_URL, OPTION_GET_BY_URL:
 				now := time.Now()
 				if now.Before(Cache[option.Value].Expires) {
-					screen.WriteData(Cache[option.Value].Data, getStatus())
-					if !sleep(ctx, time.Duration(option.Duration)*time.Second) {
+					if !displayText(ctx, screen, Cache[option.Value].Data, time.Duration(option.Duration)*time.Second) {
 						return
 					}
 					continue
@@ -511,8 +499,7 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 					}
 				}
 				fmt.Printf("url %s body %q expires %s\n", option.Value, body, Cache[option.Value].Expires)
-				screen.WriteData(body, getStatus())
-				if !sleep(ctx, time.Duration(option.Duration)*time.Second) {
+				if !displayText(ctx, screen, body, time.Duration(option.Duration)*time.Second) {
 					return
 				}
 			}
@@ -521,6 +508,30 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 			return
 		}
 	}
+}
+
+// Display a (possibly long) text in screen.
+// The text width may be too large so that the screen need to flow.
+// If it's not flow, just display text once and sleep duration.
+// if it's flow, loop displaying text for at least duration.
+// It blocks and returns true if time over;
+// Returns immediately with false if ctx is done.
+func displayText(ctx context.Context, screen *athenaLed.LedScreen, text string, duration time.Duration) bool {
+	flow, takenTime := screen.WriteData(text, getStatus())
+	if !flow {
+		return sleep(ctx, duration)
+	}
+	duration -= takenTime
+	for duration > 0 {
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+			_, takenTime = screen.WriteData(text, getStatus())
+			duration -= takenTime
+		}
+	}
+	return true
 }
 
 func getTemp(tempFlags string) string {

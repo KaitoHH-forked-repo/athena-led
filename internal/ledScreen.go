@@ -2,6 +2,7 @@ package athenaLed
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"math/rand/v2"
 	"os"
@@ -154,7 +155,8 @@ func (screen *LedScreen) Power(run bool, lightLevel byte) error {
 
 // 最多可以写入 WIDTH + 1 宽度的字符串而不需要滚动。
 // It return true if the text is display in flow.
-func (screen *LedScreen) WriteData(str string, statusProbs [4]float64) (flow bool, takenTime time.Duration) {
+func (screen *LedScreen) WriteData(ctx context.Context, str string,
+	statusProbs [4]float64) (flow bool, takenTime time.Duration) {
 	str = strings.ToUpper(str)
 	data := make([]byte, 0)
 	for _, item := range str {
@@ -168,7 +170,7 @@ func (screen *LedScreen) WriteData(str string, statusProbs [4]float64) (flow boo
 	}
 	start := time.Now()
 	if len(data) > WIDTH {
-		screen.flow(data, statusProbs)
+		screen.flow(ctx, data, statusProbs)
 		return true, time.Since(start)
 	} else {
 		screen.writeRawData(data, statusProbs)
@@ -249,7 +251,7 @@ func shouldLight(prob float64) bool {
 }
 
 // 滚动显示
-func (screen *LedScreen) flow(data []byte, statusProbs [4]float64) {
+func (screen *LedScreen) flow(ctx context.Context, data []byte, statusProbs [4]float64) {
 	screen.currentProbs = statusProbs
 	start := 0
 	for i := 1; i <= len(data); i++ {
@@ -260,7 +262,7 @@ func (screen *LedScreen) flow(data []byte, statusProbs [4]float64) {
 		copy(off[:], data[start:i])
 		screen.currentData = off
 		screen.flush()
-		time.Sleep(128 * time.Millisecond)
+		Sleep(ctx, 128*time.Millisecond)
 	}
 }
 
@@ -271,4 +273,40 @@ func (screen *LedScreen) doWriteData(values []byte, status byte) error {
 		return err
 	}
 	return screen.rightScreen.printf(append(values[14:WIDTH], status))
+}
+
+// 辅助函数：支持 Context 取消的 Sleep.
+// It blocks and returns true if time over; Return false if it returns because of ctx is done
+func Sleep(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
+	}
+}
+
+// Display a (possibly long) text in screen.
+// The text width may be too large so that the screen need to flow.
+// If it's not flow, just display text once and sleep duration.
+// if it's flow, loop displaying text for at least duration.
+// It blocks and returns true if time over;
+// Returns immediately with false if ctx is done.
+func (screen *LedScreen) DisplayText(ctx context.Context, text string, getStatus func() [4]float64,
+	duration time.Duration) bool {
+	flow, takenTime := screen.WriteData(ctx, text, getStatus())
+	if !flow {
+		return Sleep(ctx, duration)
+	}
+	duration -= takenTime
+	for duration > 0 {
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+			_, takenTime = screen.WriteData(ctx, text, getStatus())
+			duration -= takenTime
+		}
+	}
+	return true
 }

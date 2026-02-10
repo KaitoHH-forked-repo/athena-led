@@ -56,17 +56,20 @@ const (
 		`values of each type option have different meanings: "` + OPTION_DATE + `", "` + OPTION_TIME + `": ` +
 		`Go time format layout, e.g. "` + DEFAULT_DATE_FORMAT + `" or "` + DEFAULT_TIME_FORMAT +
 		`"; "` + OPTION_TEMP + `": temperature type digits string; "` + OPTION_TEXT + `": text contents; "` + OPTION_URL +
-		`": the http(s):// url; "` + OPTION_UPLOAD + `", "` + OPTION_DOWNLOAD + `": network interface name` +
+		`": the http(s):// url; "` + OPTION_UPLOAD + `", "` + OPTION_DOWNLOAD + `": network interface name. ` +
 		`Use "#5" format suffix to set led switching time (duration seconds). ` +
 		`E.g. "string:I_have_a_dream", "url:https://ipinfo.io/json#5". Default: "` + DEFAULT_OPTION +
 		`". Multiple -option flags is allowed, in which case each one is considered as a profile. ` +
 		`Use SIGUSR1 signal to switch between profiles; use SIGUSR2 signal to toggle display off / on; ` +
-		`use SIGHUP signal to turn on display / refresh content`
+		`use SIGHUP signal to turn on display / reset to default profile`
 	DEFAULT_OPTION      = OPTION_DATE + " " + OPTION_TIME
 	DEFAULT_TIME_FORMAT = "15:04:05" // 28 width
 	DEFAULT_DATE_FORMAT = "01-02"
 	DEFAULT_IFNAME      = "wan"
 	DEFAULT_TEST_URL    = "http://www.google.com/generate_204"
+
+	WEEKDAY_LAYOUT_DOT   = "%w" // use dots to represent weekday, Monday = 1 dot, Sunday = 7 dots.
+	WEEKDAY_LAYOUT_ROMAN = "%W" // use roman numberal to represent weekday, Monday = Ⅰ,Sunday = Ⅶ.
 )
 
 type Option struct {
@@ -326,17 +329,6 @@ func main() {
 	}
 }
 
-// 辅助函数：支持 Context 取消的 Sleep.
-// It blocks and returns true if time over; Return false if it returns because of ctx is done
-func sleep(ctx context.Context, d time.Duration) bool {
-	select {
-	case <-ctx.Done():
-		return false
-	case <-time.After(d):
-		return true
-	}
-}
-
 func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Option) {
 	fmt.Printf("main loop start, %d options\n", len(options))
 	timeFlag := false
@@ -351,27 +343,24 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 			case OPTION_DATE:
 				now := time.Now().In(Location)
 				formattedTime := now.Format(option.Value)
-				if option.Value == DEFAULT_DATE_FORMAT {
-					// "01-02" : 19 width
-					formattedTime += "   " // +3 = 22 width
-					switch now.Weekday() {
-					case 0: // Sunday
-						formattedTime += "７" // 6 width char. So the total is 28 width
-					case 1: // Monday
-						formattedTime += "１"
-					case 2:
-						formattedTime += "２"
-					case 3:
-						formattedTime += "３"
-					case 4:
-						formattedTime += "４"
-					case 5:
-						formattedTime += "５"
-					case 6:
-						formattedTime += "６"
+				if strings.Contains(option.Value, WEEKDAY_LAYOUT_ROMAN) {
+					var weekday rune
+					if w := now.Weekday(); w == 0 { // Sunday
+						weekday = 'Ⅶ'
+					} else {
+						weekday = rune('Ⅰ' + w - 1)
 					}
+					formattedTime = strings.ReplaceAll(formattedTime, WEEKDAY_LAYOUT_ROMAN, string(weekday))
+				} else if strings.Contains(option.Value, WEEKDAY_LAYOUT_DOT) {
+					var weekday rune
+					if w := now.Weekday(); w == 0 { // Sunday
+						weekday = '７'
+					} else {
+						weekday = rune('１' + w - 1)
+					}
+					formattedTime = strings.ReplaceAll(formattedTime, WEEKDAY_LAYOUT_DOT, string(weekday))
 				}
-				if !displayText(ctx, screen, formattedTime, time.Duration(option.Duration)*time.Second) {
+				if !screen.DisplayText(ctx, formattedTime, getStatus, time.Duration(option.Duration)*time.Second) {
 					return
 				}
 			case OPTION_TIME, OPTION_TIME_BLINK:
@@ -385,7 +374,7 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 						}
 						timeFlag = !timeFlag
 					}
-					if !displayText(ctx, screen, formattedTime, time.Second) {
+					if !screen.DisplayText(ctx, formattedTime, getStatus, time.Second) {
 						return
 					}
 				}
@@ -393,7 +382,7 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 				// 倒计时 option.Duration 秒。例如 5 秒则依次显示 5 4 3 2 1.
 				for i := range option.Duration {
 					countdownStr := fmt.Sprintf("⏳ %d", option.Duration-i)
-					if !displayText(ctx, screen, countdownStr, time.Second) {
+					if !screen.DisplayText(ctx, countdownStr, getStatus, time.Second) {
 						return
 					}
 				}
@@ -402,18 +391,18 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 				if tempString == "" {
 					continue
 				}
-				if !displayText(ctx, screen, tempString, time.Duration(option.Duration)*time.Second) {
+				if !screen.DisplayText(ctx, tempString, getStatus, time.Duration(option.Duration)*time.Second) {
 					return
 				}
 			case OPTION_TEXT, OPTION_STRING:
-				if !displayText(ctx, screen, option.Value, time.Duration(option.Duration)*time.Second) {
+				if !screen.DisplayText(ctx, option.Value, getStatus, time.Duration(option.Duration)*time.Second) {
 					return
 				}
 			case OPTION_CPU:
 				for range option.Duration {
 					_, cpuUsage, _, _, _, _, _ := Sm.Get(option.Value)
 					displayStr := fmt.Sprintf("CPU %02d", min(int(cpuUsage*100), 99))
-					if !displayText(ctx, screen, displayStr, time.Second) {
+					if !screen.DisplayText(ctx, displayStr, getStatus, time.Second) {
 						return
 					}
 				}
@@ -421,7 +410,7 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 				for range option.Duration {
 					_, _, memUsage, _, _, _, _ := Sm.Get(option.Value)
 					displayStr := fmt.Sprintf("MEM %02d", min(int(memUsage*100), 99))
-					if !displayText(ctx, screen, displayStr, time.Second) {
+					if !screen.DisplayText(ctx, displayStr, getStatus, time.Second) {
 						return
 					}
 				}
@@ -438,7 +427,7 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 					} else {
 						displayStr += "↘ " + ByteCountIEC(int64(rxRate))
 					}
-					if !displayText(ctx, screen, displayStr, time.Second) {
+					if !screen.DisplayText(ctx, displayStr, getStatus, time.Second) {
 						return
 					}
 				}
@@ -452,7 +441,7 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 			case OPTION_URL, OPTION_GET_BY_URL:
 				now := time.Now()
 				if now.Before(Cache[option.Value].Expires) {
-					if !displayText(ctx, screen, Cache[option.Value].Data, time.Duration(option.Duration)*time.Second) {
+					if !screen.DisplayText(ctx, Cache[option.Value].Data, getStatus, time.Duration(option.Duration)*time.Second) {
 						return
 					}
 					continue
@@ -499,7 +488,7 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 					}
 				}
 				fmt.Printf("url %s body %q expires %s\n", option.Value, body, Cache[option.Value].Expires)
-				if !displayText(ctx, screen, body, time.Duration(option.Duration)*time.Second) {
+				if !screen.DisplayText(ctx, body, getStatus, time.Duration(option.Duration)*time.Second) {
 					return
 				}
 			}
@@ -508,30 +497,6 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 			return
 		}
 	}
-}
-
-// Display a (possibly long) text in screen.
-// The text width may be too large so that the screen need to flow.
-// If it's not flow, just display text once and sleep duration.
-// if it's flow, loop displaying text for at least duration.
-// It blocks and returns true if time over;
-// Returns immediately with false if ctx is done.
-func displayText(ctx context.Context, screen *athenaLed.LedScreen, text string, duration time.Duration) bool {
-	flow, takenTime := screen.WriteData(text, getStatus())
-	if !flow {
-		return sleep(ctx, duration)
-	}
-	duration -= takenTime
-	for duration > 0 {
-		select {
-		case <-ctx.Done():
-			return false
-		default:
-			_, takenTime = screen.WriteData(text, getStatus())
-			duration -= takenTime
-		}
-	}
-	return true
 }
 
 func getTemp(tempFlags string) string {
@@ -693,9 +658,7 @@ func runDino(parentCtx context.Context, screen *athenaLed.LedScreen, duration in
 
 		tick++
 
-		// 使用 sleep 函数以便快速响应中断/超时
-		// 注意：这里传入的是带有超时的 ctx
-		if !sleep(ctx, frameDuration) {
+		if !athenaLed.Sleep(ctx, frameDuration) {
 			return
 		}
 	}

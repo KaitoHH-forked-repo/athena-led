@@ -20,8 +20,8 @@
   - countdown : 显示倒计时计数。
   - dino : 显示 [Chrome Dino](https://en.wikipedia.org/wiki/Dinosaur_Game) 风格的动画。
 - `-option` flag 部分原有选项也有修改：
-  - date : 默认在 `01-02` 的右侧显示代表星期几(weekday)的图标，星期一显示为 `1个点`，星期二为 `2个点`，星期日为 `7个点`。
-  - time : 默认时间格式改为 `15:04:05`，显示秒数。
+  - date : 可以自定义日期显示格式（Go 时间格式字符串）。支持两种自定义的代表星期几的时间格式符：`%w` - 使用点数(dots)表示；`%W` - 使用罗马数字表示。
+  - time : 默认时间格式改为 `15:04:05`，显示秒数。同样可以自定义时间显示格式。
 - 点阵屏幕两侧的4个 LED 状态灯(status)现在会动态变化：
   - time : 表示系统 CPU 占用率。占用率越高闪烁越快。
   - medal : 表示当前路由器 Internet 连接是否正常，如果正常则亮。默认使用的测试 url: `http://www.google.com/generate_204`。
@@ -30,7 +30,8 @@
   - `string:i_have_a_dream` : 显示 "i have a dream" 文字 (将内容里的空格替换为 _)。
   - `url:https://ipinfo.io/json#3` : 显示 `https://ipinfo.io/json` 这个 URL 的内容，显示时长为3秒。
   - `upload:lan1` : 显示 `lan1` 这个网络接口的上传速度。
-  - `time:15_04` : 显示 "15 04" 格式的时间(Go 时间格式字符串)。
+  - `date:01-02 %W` : 显示 `01-02` 格式的日期以及代表当前是星期几的罗马字符(Go 时间格式字符串)。
+  - `time:15_04` : 显示 "15 04" 格式的时间。
   - `temp:24` : 显示区域 2 (`/sys/class/thermal/thermal_zone2`) 和 4 (`/sys/class/thermal/thermal_zone4`) 的温度。
   - `dino#15` : 显示 15秒的恐龙动画。
 - 支持重复传入多个 `-option` 参数。每个参数作为一个 Profile。程序启动后默认使用第一个 Profile。

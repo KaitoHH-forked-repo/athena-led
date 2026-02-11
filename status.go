@@ -265,8 +265,8 @@ func ByteCountIEC(b int64) string {
 		return fmt.Sprintf("%d B", b)
 	}
 	div, exp := int64(unit), 0
-	// 为了节省宽度，将 "100.0 K" 显示为 "0.1 M"
-	for n := b / unit; n >= 100; n /= unit {
+	// 为了节省宽度，"1000K" 以上即换算为 M
+	for n := b / unit; n >= 1000; n /= unit {
 		div *= unit
 		exp++
 	}
@@ -275,6 +275,32 @@ func ByteCountIEC(b int64) string {
 		return fmt.Sprintf("%f %c", value, "KMGTPE"[exp])
 	}
 	return fmt.Sprintf("%.1f %c", value, "KMGTPE"[exp])
+}
+
+// Return string max width: "1.6|2.6M" => 28
+func UpDlByteCountIEC(up int64, dl int64) string {
+	updl := max(up, dl)
+	const unit = 1024
+	div, exp := int64(unit), 0
+	for n := updl / unit; n >= 100; n /= unit {
+		div *= unit
+		exp++
+	}
+	upValue := float64(up) / float64(div)
+	dlValue := float64(dl) / float64(div)
+	upStr := ""
+	dlStr := ""
+	if upValue >= 10 {
+		upStr = fmt.Sprintf("%f", upValue)
+	} else {
+		upStr = fmt.Sprintf("%.1f", upValue)
+	}
+	if dlValue >= 10 {
+		dlStr = fmt.Sprintf("%f", dlValue)
+	} else {
+		dlStr = fmt.Sprintf("%.1f", dlValue)
+	}
+	return fmt.Sprintf("%s|%s%c", upStr, dlStr, "KMGTPE"[exp])
 }
 
 type SysMonitor struct {

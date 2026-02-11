@@ -43,6 +43,7 @@ const (
 	OPTION_MEM        = "mem"      // memory usage
 	OPTION_UPLOAD     = "upload"   // network upload speed
 	OPTION_DOWNLOAD   = "download" // network download speed
+	OPTION_UPDL       = "updl"     // upload + download speed
 	OPTION_COUNTDOWN  = "countdown"
 	OPTION_DINO       = "dino"
 	OPTION_URL        = "url"
@@ -428,6 +429,13 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 						displayStr += "↘ " + ByteCountIEC(int64(rxRate))
 					}
 					if !screen.DisplayText(ctx, displayStr, getStatus, time.Second) {
+						return
+					}
+				}
+			case OPTION_UPDL:
+				for range option.Duration {
+					_, _, _, txRate, rxRate, _, _ := Sm.Get(Ifname)
+					if !screen.DisplayText(ctx, UpDlByteCountIEC(int64(txRate), int64(rxRate)), getStatus, time.Second) {
 						return
 					}
 				}

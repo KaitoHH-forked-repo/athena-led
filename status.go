@@ -86,6 +86,7 @@ type StatusManager struct {
 	sysMonitor  *SysMonitor
 	testUrl     string
 	netOk       atomic.Bool
+	option      *Option // current displayed option
 }
 
 func NewStatusManager(ifname string, testUrl string, profiles [][]*Option) *StatusManager {
@@ -109,6 +110,39 @@ func NewStatusManager(ifname string, testUrl string, profiles [][]*Option) *Stat
 		sysMonitor:  &SysMonitor{},
 		testUrl:     testUrl,
 	}
+}
+
+func (sm *StatusManager) SetOption(option *Option) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.option = option
+}
+
+// return wan,lan4,lan3,lan2,lan1 speeds string "XXXXX", where X is:
+// 'O' : -1 (disconnected); 'B': 10 Mbps (basic); 'H' : 100 Mbps (hundred); 'G' : 1000Mbps; 'S': 2500 Mbps (super).
+// The order is in accordance with physical interface ports order.
+func (sm *StatusManager) GetLinkSpeedsStr() string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	result := ""
+	for i := 4; i >= 0; i-- {
+		speed := sm.sysMonitor.linkSpeeds[i]
+		switch speed {
+		case -1:
+			result += "O"
+		case 10:
+			result += "B"
+		case 100:
+			result += "H"
+		case 1000:
+			result += "G"
+		case 2500:
+			result += "S"
+		default:
+			result += "O"
+		}
+	}
+	return result
 }
 
 func (sm *StatusManager) Get(ifname string) (netOk bool, cpuUsage, memUsage, txRate, rxRate, upProb, dlProb float64) {
@@ -150,7 +184,16 @@ func (sm *StatusManager) Run(ctx context.Context) {
 			sm.mu.Lock()
 			if counter%5 == 0 {
 				sm.sysMonitor.updateCpu()
-				sm.sysMonitor.updateMemory()
+				if sm.option != nil {
+					if sm.option.Type == OPTION_MEM {
+						sm.sysMonitor.updateMemory()
+					}
+				}
+			}
+			if sm.option != nil {
+				if sm.option.Type == OPTION_NIC {
+					sm.sysMonitor.updateLinkSpeeds()
+				}
 			}
 			for _, ns := range sm.netStatuses {
 				ns.Update()
@@ -300,7 +343,7 @@ func UpDlByteCountIEC(up int64, dl int64) string {
 	} else {
 		dlStr = fmt.Sprintf("%.1f", dlValue)
 	}
-	return fmt.Sprintf("%s|%s%c", upStr, dlStr, "KMGTPE"[exp])
+	return fmt.Sprintf("%s  %s%c", upStr, dlStr, "KMGTPE"[exp])
 }
 
 type SysMonitor struct {
@@ -309,6 +352,9 @@ type SysMonitor struct {
 	// 当前 CPU 整体使用率 (范围 0.0 - 1.0)
 	cpuUsage float64
 	memUsage float64
+	// physical Network Interface Card link speeds: lan1,lan2,lan3,lan4,wan .
+	// Possible values: -1 (not plugged), 10, 100, 1000, 2500.
+	linkSpeeds [5]int
 }
 
 func (sm *SysMonitor) updateCpu() error {
@@ -372,6 +418,26 @@ func (sm *SysMonitor) updateCpu() error {
 	// 使用率 = (总时间增量 - 空闲时间增量) / 总时间增量
 	sm.cpuUsage = float64(totalDelta-idleDelta) / float64(totalDelta)
 	return nil
+}
+
+// physical network interfaces
+var Interfaces = []string{"lan1", "lan2", "lan3", "lan4", "wan"}
+
+func (sm *SysMonitor) updateLinkSpeeds() {
+	for i, iface := range Interfaces {
+		speedPath := fmt.Sprintf("/sys/class/net/%s/speed", iface)
+		content, err := os.ReadFile(speedPath)
+		if err != nil {
+			sm.linkSpeeds[i] = -1
+			continue
+		}
+		speed, err := strconv.Atoi(strings.TrimSpace(string(content)))
+		if err != nil {
+			sm.linkSpeeds[i] = -1
+			continue
+		}
+		sm.linkSpeeds[i] = speed
+	}
 }
 
 func (sm *SysMonitor) updateMemory() error {

@@ -17,7 +17,8 @@
   - mem : 内存占用率。
   - upload : 当前上传速度。
   - download : 当前下载速度。
-  - updl : 当前的上传和下载速度。显示内容的格式为 `5.6M|10M`，上传数据在前。最大程度精简了格式，能够完整显示在屏幕上而无需滚动。
+  - updl : 当前的上传和下载速度。上传数据在前。最大程度精简了格式，能够完整显示在屏幕上而无需滚动。
+  - nic : 当前各个物理网口的链路状态。网口显示顺序为 `wan,lan4,lan3,lan2,lan1`。每个网口的链路状态用一个字母表示：`O` - disconnected; `B` - 10 Mbps; `H` - 100 Mbps; `G` - 1000 Mbps; `S` - 2500 Mbps。
   - countdown : 显示倒计时计数。
   - dino : 显示 [Chrome Dino](https://en.wikipedia.org/wiki/Dinosaur_Game) 风格的动画。
 - `-option` flag 部分原有选项也有修改：

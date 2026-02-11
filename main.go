@@ -23,7 +23,7 @@ import (
 	athenaLed "athenaLed/internal"
 )
 
-const Version = "v0.1.4-dev"
+const Version = "v0.1.4"
 
 // syscall.SIGUSR1 & SIGUSR2 only available in Linux. But we are developping in Windows desktop
 // https://man7.org/linux/man-pages/man7/signal.7.html
@@ -44,6 +44,7 @@ const (
 	OPTION_UPLOAD     = "upload"   // network upload speed
 	OPTION_DOWNLOAD   = "download" // network download speed
 	OPTION_UPDL       = "updl"     // upload + download speed
+	OPTION_NIC        = "nic"      // Network Interface Card (wan, lan4, lan3, lan2, lan1) status
 	OPTION_COUNTDOWN  = "countdown"
 	OPTION_DINO       = "dino"
 	OPTION_URL        = "url"
@@ -340,6 +341,7 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 				return
 			}
 			fmt.Printf("option: %v\n", option)
+			Sm.SetOption(option)
 			switch option.Type {
 			case OPTION_DATE:
 				now := time.Now().In(Location)
@@ -436,6 +438,12 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 				for range option.Duration {
 					_, _, _, txRate, rxRate, _, _ := Sm.Get(Ifname)
 					if !screen.DisplayText(ctx, UpDlByteCountIEC(int64(txRate), int64(rxRate)), getStatus, time.Second) {
+						return
+					}
+				}
+			case OPTION_NIC:
+				for range option.Duration {
+					if !screen.DisplayText(ctx, Sm.GetLinkSpeedsStr(), getStatus, time.Second) {
 						return
 					}
 				}

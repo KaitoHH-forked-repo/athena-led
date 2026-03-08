@@ -10,8 +10,12 @@
 
 - 增加支持显示的字符数量。现在所有 ASCII 字符都能够正常显示。也支持部分特殊 Unicode 符号，包括：
   - ♥ (heart), ☀ (sunny), ☾ (moon), ☁ (cloudy), ⛆ (little rain), 🌧 (rainy), ⛈ (thunderstorm), ❄ (snow), 🌫 (fog)
-  -  ←, →, ↑, ↓, ↗, ↘, ✓, ✗ 
+  -  ←, →, ↑, ↓, ↗, ↘, ✓, ✗
 - 默认写入 pid 文件 `/var/run/athena-led.pid`。
+- `-backend` 参数，用于选择屏幕驱动后端：
+  - `auto`（默认）：启动时优先使用 `/dev/tmp1628-led`，失败则回退 GPIO。
+  - `tmp1628`：使用 `/dev/tmp1628-led`，设备不存在时启动报错。
+  - `gpio`：使用原来的 GPIO 方案。
 - `-option` flag 增加几种可选显示内容：
   - cpu : CPU 占用率。
   - mem : 内存占用率。
